@@ -1,48 +1,23 @@
-# Scaffold Status
+# Validation Status
 
-## Implemented in v0.1
+`rag-adapt-lab` is an executable single-GPU research harness rather than an orchestration-only
+scaffold. It includes the Base/RAG/SFT+RAG/RAFT+RAG runner, paired bootstrap reporting,
+hard-negative RAFT data preparation, validation-aware LoRA/QLoRA training, fail-closed adapter
+provenance, detailed systems metrics, and optional robust judge scoring.
 
-- Domain-neutral JSONL schemas for documents, evaluation records, SFT records, and RAFT records
-- Dataset validation CLI
-- Generic RAFT dataset builder using annotated oracle documents plus random distractors
-- BM25 retrieval backend
-- Dense retrieval backend interface/implementation
-- Retrieval evaluation: Recall@K, Hit Rate@K, MRR, nDCG@K
-- Deterministic generation metrics: normalized exact match and token F1
-- QLoRA training scaffold using Transformers, TRL, PEFT, and bitsandbytes
-- SFT and RAFT formatting paths through the same trainer
-- W&B Models run/artifact tracker
-- W&B Weave tracing wrapper
-- Null tracking backend
-- OpenAI-compatible generation runner for local vLLM/SGLang-style endpoints
-- 16GB and 24GB GPU configuration profiles
-- Qwen3 4B, 8B, and 14B example model configs
-- Base / RAG / SFT+RAG / RAFT+RAG recipe configs
-- Benchmark execution-plan CLI
-- Unit tests and GitHub Actions CI scaffold
-- Dockerfile for NVIDIA CUDA environments
+Validation is intentionally reported in layers:
 
-## Deliberate extension points
+- Unit CI installs `.[dev]` and exercises core contracts without optional ML dependencies.
+- CPU integration CI installs the exact `.[rag,train,dev]` versions and exercises real BM25,
+  Datasets, Transformers tokenizer formatting, TRL `SFTConfig`, completion-only configuration,
+  manifest verification, benchmark planning/reporting, and Compose parsing.
+- GPU integration is a separate scheduled/manual workflow for actual tiny LoRA training,
+  adapter save/load, base-versus-adapter generation, CUDA memory measurement, and one benchmark.
 
-These are intentionally not presented as complete production implementations in v0.1:
+Passing unit or CPU integration does not imply that CUDA was exercised. A checkout should claim
+GPU end-to-end validation only when its GPU workflow or a documented local CUDA run completed.
 
-- end-to-end benchmark execution across all four recipes;
-- dense/hybrid retriever wiring in the CLI;
-- hard-negative mining for RAFT;
-- local LLM-as-a-judge and domain-specific scorers;
-- automatic W&B Artifact lineage across every CLI command;
-- full Transformers generation runner;
-- vLLM/SGLang server lifecycle management;
-- reranking;
-- production serving and distributed training.
-
-The repository is structured so these capabilities can be added without changing the data contract or experiment protocol.
-
-## Validation performed on the scaffold
-
-- Python source compilation completed successfully.
-- Unit tests completed successfully.
-- CLI help entrypoint executed successfully through `PYTHONPATH=src`.
-- Repository text was checked for Hangul; all scaffold content is in English.
-
-GPU training was not executed in the build environment because no target RTX 5080/5090 CUDA runtime was available here. Validate CUDA/PyTorch/bitsandbytes compatibility on the target workstation before starting a full QLoRA run.
+Known extension points remain batched/vLLM generation, built-in dense/hybrid negative-mining
+strategies, semantic claim decomposition, judge calibration against human labels, and
+multiple-comparison corrections. Distributed training and production orchestration remain out of
+scope.

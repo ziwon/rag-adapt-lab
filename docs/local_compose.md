@@ -97,14 +97,16 @@ Run the public SQuAD workflow as explicit, restartable jobs. Preparation emits b
 docker compose --env-file .env.compose run --rm prepare
 TRAIN_RECIPE=configs/recipes/hf-squad-sft-smoke.yaml \
   TRAIN_FILE=data/hf_squad_smoke/sft_train.jsonl \
+  VALIDATION_FILE=data/hf_squad_smoke/sft_validation.jsonl \
   docker compose --env-file .env.compose run --rm train
 TRAIN_RECIPE=configs/recipes/hf-squad-raft-smoke.yaml \
   TRAIN_FILE=data/hf_squad_smoke/raft_train.jsonl \
+  VALIDATION_FILE=data/hf_squad_smoke/raft_validation.jsonl \
   docker compose --env-file .env.compose run --rm train
 docker compose --env-file .env.compose run --rm benchmark
 ```
 
-The `train` service passes the held-out evaluation file for leakage checking. The `benchmark` service writes `outputs/hf-squad-benchmark/summary.json`, `report.md`, and per-recipe predictions. Its tracker defaults to `none`; set `BENCHMARK_TRACKING_BACKEND=wandb` to log metrics and artifacts to the local W&B service. The older `evaluate` job remains as a focused Base-vs-RAFT/oracle diagnostic.
+The preparation job splits before hard-negative mining and emits matched SFT/RAFT train and validation files. The `train` service passes validation explicitly and uses the held-out evaluation file only for leakage/provenance checks. The benchmark fails closed on incompatible adapter manifests and writes schema-v2 `summary.json`, `report.md`, and per-recipe predictions. Its tracker defaults to `none`; set `BENCHMARK_TRACKING_BACKEND=wandb` to log metrics and artifacts. The older `evaluate` job remains a focused Base-vs-adapter/oracle diagnostic, not the canonical four-recipe result.
 
 Verify W&B Models logging and a Weave trace after configuring the API key and licenses:
 

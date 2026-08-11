@@ -27,11 +27,14 @@ Run all recipes in one `raglab benchmark` invocation where possible. The runner 
 | ndcg@k | normalized discounted cumulative gain |
 | exact_match | deterministic generation metric when applicable |
 | token_f1 | deterministic generation metric when applicable |
-| correctness | judge or task-specific metric |
-| groundedness | judge or task-specific metric |
-| latency_p50 | end-to-end latency |
-| latency_p95 | end-to-end latency |
-| peak_vram_gb | peak observed GPU memory |
+| reference_overlap | deterministic reference token overlap; not semantic correctness |
+| judge_correctness | optional model-judge score with coverage/failure rate |
+| lexical_groundedness | deterministic lexical support heuristic |
+| judge_groundedness | optional model-judge groundedness |
+| inference_e2e_latency_p50_s | retrieval through decoded answer; no scoring/judge |
+| inference_e2e_latency_p95_s | retrieval through decoded answer; no scoring/judge |
+| peak_allocated_vram_gb | maximum live allocated CUDA tensor memory |
+| peak_reserved_vram_gb | maximum CUDA allocator reservation |
 
 `summary.json` is the source of truth; `report.md` is a deterministic rendering of it. Per-example JSONL must be retained so aggregate results and paired statistics can be audited.
 
@@ -53,10 +56,26 @@ The interval describes uncertainty over the sampled evaluation examples; it does
 
 ## Leakage controls
 
-Do not create training examples from the held-out evaluation answers. Always pass the benchmark file to both `prepare-raft --held-out-eval` and `train --held-out-eval`; both reject reused IDs and normalized questions. A training validation set must come from a separate file or a deterministic split of training data, never from the benchmark evaluation file.
+Do not create training examples from held-out answers. Always pass the benchmark file to both preparation and training. For RAFT, prefer grouped split-before-mining and pass the resulting train/validation files explicitly. Choose `shared-corpus` when document reuse is part of the task, or `document-disjoint` for source generalization. The latter partitions every positive and distractor pool before retrieval indexing.
 
 For synthetic data generation, record the source model, prompt version, filtering rules, and whether evaluation documents were excluded. For hard-negative mining, index only the training corpus. Record the mining strategy, seed, candidate pool, selected document IDs, ranks, and scores.
 
 ## Latency protocol
 
-The local runner performs a configurable warm-up outside the measured region, synchronizes CUDA around generation, and reports per-example generation and end-to-end latency. Retrieval time is counted only for retrieval-enabled recipes. Peak allocated GPU VRAM is reset and measured per recipe; tokens/sec is computed from generated tokens where token accounting is available. Run timing comparisons on an otherwise idle machine and repeat them when small differences matter.
+The local runner performs an unmeasured warm-up and synchronizes CUDA around transfers and generation. Persist retrieval, prompt-build, chat-template, tokenization, device-transfer, model-generate, decode, inference-E2E, deterministic-scoring, and judge latency separately. Judge latency is never part of user-facing inference latency. Report allocated and reserved CUDA peaks, output/total-token throughput, batch size, and sequential/batched mode. Repeat timing runs on an idle machine when small differences matter.
+
+## Adapter provenance gate
+
+Schema-v2 adapter manifests are mandatory by default. Before loading, validate the immutable base,
+expected SFT/RAFT mode, prompt name/version/hash, chat-template arguments, held-out file hash, and
+recomputed adapter artifact hash. Distinct SFT and RAFT conditions must not resolve to the same
+path or artifact hash. `--allow-unverified-adapter` is only a legacy escape hatch and invalidates a
+clean causal interpretation; its warning must remain in both machine and Markdown reports.
+
+## Thinking-mode protocol
+
+The standard concise-QA condition disables Qwen3 thinking and uses greedy decoding with 64 new
+tokens. A thinking-enabled run is a different experimental condition: use sampled thinking
+decoding, reserve enough output tokens, persist reasoning and answer tokens separately, and score
+only the parsed final answer. Never place thinking and non-thinking recipes in one adaptation-only
+comparison.

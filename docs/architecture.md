@@ -41,17 +41,19 @@ Retrievers return ranked documents and scores. BM25 and pinned dense retrieval a
 
 ### Generation
 
-Generation is an interface. The benchmark's local Transformers runner loads the pinned base model and optional PEFT adapters, records token counts/timing/peak VRAM, and uses paired per-example seeds. The existing OpenAI-compatible runner remains suitable for vLLM/SGLang integrations; a factory can be injected without changing benchmark or evaluation code.
+Generation is an interface. The local runner validates the explicit chat-template condition, separates Qwen-style reasoning from the scored final answer, and records prompt construction, template, tokenization, transfer, generation, decode, token, and allocated/reserved VRAM metrics. `inference_e2e_latency_s` covers retrieval through decode and excludes all scoring.
 
 ### Training
 
-The QLoRA trainer uses TRL + PEFT + bitsandbytes and accepts ordinary SFT or RAFT records. It uses an explicit validation file or deterministic seeded split, checks both training partitions against an optional held-out benchmark file, evaluates on a configurable schedule, supports early stopping, and persists the best adapter plus a training manifest.
+The QLoRA trainer uses pinned TRL + PEFT + bitsandbytes and accepts ordinary SFT or RAFT records. Group-aware splitting operates on connected grouping keys and supports shared-corpus and document-disjoint policies. RAFT can split raw labeled QA before independently mining each partition. Both partitions are checked against a mandatory held-out benchmark file before a verifiable adapter is produced.
 
-Training records use TRL's prompt/completion contract with completion-only loss. This masks prompt and retrieved-document tokens, leaving only assistant completion tokens as labels. Chat formatting uses conversational prompt/completion messages; it does not depend on template-specific assistant masks.
+Both training modes use prompt v3: SFT passes an empty context list and RAFT passes evidence plus distractors. Because TRL 0.24.0 does not accept chat-template kwargs in `SFTConfig`, the tokenizer template is explicitly rendered first with the recorded kwargs, then passed to TRL as plain prompt/completion text with completion-only loss.
+
+Training and adapter manifests use schema v2. The benchmark recomputes adapter artifact hashes and validates model revision, adaptation mode, prompt identity/hash, chat-template args, and the exact held-out evaluation hash. Missing or incompatible manifests fail closed unless a visibly recorded legacy override is enabled.
 
 ### Evaluation
 
-Retrieval metrics, exact match, token F1, lexical groundedness, unsupported-claim rate, and optional citation metrics are deterministic. Model-based correctness/groundedness is complementary and uses a versioned scorer over a pluggable judge backend. OpenAI-compatible endpoints and in-process callable judges are supported; a no-op scorer disables all plugins while retaining canonical EM/F1.
+Retrieval metrics, exact match, token F1, `reference_overlap`, lexical groundedness, lexical unsupported-claim rate, and optional citation metrics are deterministic. Model-based scores remain complementary. Judge inputs are delimited untrusted data, endpoint failures are isolated unless strict mode is requested, and cache/retry/failure/latency metadata remains auditable.
 
 The statistics layer pairs recipes by evaluation ID and produces deterministic percentile-bootstrap confidence intervals. The report layer consumes only `summary.json` data, so human-readable reporting stays separate from model execution.
 

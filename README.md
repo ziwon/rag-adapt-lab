@@ -39,6 +39,11 @@ The default profiles target single-GPU development and experimentation:
 
 The included Qwen configs are examples, not hard requirements. Their Hub revisions are immutable commit SHAs and remote model code is disabled. Any compatible causal LM can be added through config with the same safeguards.
 
+The default Qwen3 condition is deliberately concise and non-thinking: every shipped Qwen3 config
+sets `chat_template_kwargs.enable_thinking: false`, `do_sample: false`, and
+`max_new_tokens: 64`. Thinking mode is supported only as a separately labeled sampled condition;
+its reasoning and final answer are parsed and counted independently, and EM/F1 use the final answer.
+
 ## Repository layout
 
 ```text
@@ -100,10 +105,10 @@ The labeled RAFT source uses the same schema as `eval.jsonl`, but it must be a d
 ### `sft.jsonl` (optional)
 
 ```json
-{"id":"sft-001","instruction":"Answer using the domain terminology.","input":"Question...","output":"Expected answer..."}
+{"id":"sft-001","input":"Question...","output":"Expected answer..."}
 ```
 
-If no explicit SFT file is available, you can create one from your own pipeline or use the RAFT builder as a starting point for retrieval-aware examples.
+The legacy `instruction` field remains accepted as data metadata, but schema v2 deliberately does not render per-row instruction variants: SFT must use the same benchmark prompt contract with an empty document list. If no explicit SFT file is available, derive it from the same pre-split labeled QA source used for RAFT.
 
 ## Quick start
 
@@ -164,13 +169,15 @@ raglab prepare-raft \
   --training-set examples/demo/train_qa.jsonl \
   --held-out-eval examples/demo/eval.jsonl \
   --output data/raft_train.jsonl \
+  --validation-output data/raft_validation.jsonl \
+  --split-config configs/splits/grouped-shared-corpus.yaml \
   --distractors 2 \
   --negative-strategy bm25-hard-negative \
   --candidate-pool-size 20 \
   --seed 42
 ```
 
-`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. Mining metadata records the strategy, seed, candidate ranks, and scores; relevance labels are never rendered into the training prompt. The builder also accepts an injected retriever, which is the extension point for dense or hybrid mining.
+`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. With `--validation-output`, raw QA is group-split first and separate retrievers mine each partition. `shared-corpus` permits document reuse while keeping questions disjoint; `document-disjoint` partitions positives and distractor pools so no document crosses the boundary. The emitted manifest records group counts, fingerprints, overlap counts, corpus policy, mining scope, and seed. Relevance labels remain metadata and are never rendered into the prompt.
 
 ### 5. Run retrieval evaluation
 
@@ -188,6 +195,7 @@ raglab eval-retrieval \
 raglab train \
   --config configs/recipes/sft-rag.yaml \
   --train-file examples/demo/sft.jsonl \
+  --validation-file data/sft_validation.jsonl \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
@@ -197,12 +205,13 @@ For RAFT:
 raglab train \
   --config configs/recipes/raft-rag.yaml \
   --train-file data/raft_train.jsonl \
+  --validation-file data/raft_validation.jsonl \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
-Training configs default to a seeded validation split. Supply `--validation-file` to use a separate validation file instead. In both cases, `--held-out-eval` is used only for overlap checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint by validation metric, saves the resulting adapter, and writes `training_manifest.json` with split fingerprints, IDs, seed, metrics, and best-checkpoint information. Each adapter also receives `raglab_adapter_manifest.json`; the benchmark enforces its pinned model ID/revision before loading it.
+Training configs default to a deterministic group-aware validation split. Supplying the partition produced before RAFT mining with `--validation-file` is preferred. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v2 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash.
 
-SFT and RAFT records are passed to TRL as prompt/completion datasets with `completion_only_loss: true`. Prompt, document, and instruction tokens are masked from the loss; only assistant/completion tokens are training targets. Oracle relevance flags in RAFT JSONL are also excluded from the rendered prompt.
+SFT and RAFT use exactly the same versioned `rag-user-prompt` builder. SFT supplies no documents; RAFT supplies positive evidence and distractors. For TRL 0.24.0, the tokenizer chat template is explicitly rendered with the model's effective kwargs before creating plain prompt/completion records. `completion_only_loss: true` therefore masks the entire prompt (including retrieved documents), leaving only assistant completion tokens as targets. Oracle relevance flags are excluded.
 
 ### 7. Run the benchmark matrix
 
@@ -225,22 +234,28 @@ raglab benchmark \
 
 The runner builds the retrieval index once, caches one ranking per evaluation example, and holds the model revision, prompt version, retrieval results, generation settings, and scorer versions fixed. Base and RAG share the same loaded base model; adapted recipes load their PEFT adapters on that same revision. A fixed per-example sampling seed schedule and unmeasured warm-up make paired quality and latency comparisons less confounded.
 
+Adapter validation fails closed. SFT and RAFT manifests must declare the expected mode and match
+the benchmark model revision, prompt contract, chat-template args, and current held-out file hash;
+their recorded artifact hashes are recomputed, and identical SFT/RAFT artifacts are rejected. A
+legacy adapter can be run only with `--allow-unverified-adapter`; the CLI emits a warning and both
+`summary.json` and `report.md` label the experiment as unverified.
+
 Outputs include:
 
-- `predictions/<recipe>.jsonl` and combined `predictions.jsonl`, including retrieved IDs/scores, timings, token counts, and all per-example scores;
+- `predictions/<recipe>.jsonl` and combined `predictions.jsonl`, including retrieved IDs/scores, every inference stage, separate reasoning/answer token counts, deterministic scoring time, judge time/status, and all per-example scores;
 - `summary.json`, containing aggregate metrics, configuration/input hashes, and paired percentile-bootstrap intervals;
 - `report.md`, containing the recipe table, retrieval quality, decision-oriented comparisons, latency, throughput, and peak GPU VRAM.
 
 Use `--dry-run --plan-output outputs/benchmark-plan.json` to validate and save a plan without loading a model. W&B logging is opt-in with `--tracking-backend wandb`; the default is local-only.
 
-The default scorer combines deterministic reference correctness with an explicitly labeled lexical groundedness/unsupported-claim heuristic. An optional versioned LLM judge can target any OpenAI-compatible endpoint:
+The default scorer combines deterministic `reference_overlap` with explicitly labeled lexical groundedness/unsupported-claim heuristics. An optional versioned LLM judge can target any OpenAI-compatible endpoint:
 
 ```bash
 cp configs/scorers/openai-compatible.example.yaml configs/scorers/local-judge.yaml
 export JUDGE_API_KEY=local
 ```
 
-The Python scorer API also accepts `CallableJudgeBackend` for an in-process local model. Set `mode: disabled` (or use `configs/scorers/noop.yaml`) to disable plugin scores; exact match and token F1 remain active. Optional `[Document N]` citation precision/recall can be enabled with `citation_metrics: true` when the evaluated prompt/model is designed to emit citations.
+The judge treats the answer and retrieved text as untrusted serialized data under a separate system rubric. Connect/read timeouts, bounded retry/backoff, response-size limits, structured output, concurrency, deterministic cache, and strict/non-strict behavior are configurable. Non-strict failures are isolated per example and never remove EM/F1; reports include judge coverage and failure rate. The Python API also accepts `CallableJudgeBackend`. Set `mode: disabled` to disable plugin scores while retaining EM/F1.
 
 ### Public Hugging Face smoke experiment
 
@@ -254,11 +269,13 @@ python scripts/prepare_hf_squad.py \
 raglab train \
   --config configs/recipes/hf-squad-sft-smoke.yaml \
   --train-file data/hf_squad_smoke/sft_train.jsonl \
+  --validation-file data/hf_squad_smoke/sft_validation.jsonl \
   --held-out-eval data/hf_squad_smoke/eval.jsonl
 
 raglab train \
   --config configs/recipes/hf-squad-raft-smoke.yaml \
   --train-file data/hf_squad_smoke/raft_train.jsonl \
+  --validation-file data/hf_squad_smoke/raft_validation.jsonl \
   --held-out-eval data/hf_squad_smoke/eval.jsonl
 
 raglab benchmark \
@@ -336,12 +353,13 @@ The core package provides deterministic metrics and complementary scorer plugins
 
 Recommended fields to log with every run:
 
-- end-to-end latency
-- retrieval latency
-- generation latency
+- inference E2E latency (retrieval through decode, excluding scoring/judge)
+- retrieval, prompt-build, chat-template, tokenization, transfer, generation, and decode latency
+- deterministic scoring latency and separate judge latency
 - prompt/output tokens
-- tokens/sec
-- peak GPU memory
+- reasoning/answer tokens for thinking-enabled conditions
+- output and total tokens per model-generation second
+- peak allocated and peak reserved GPU VRAM
 - GPU utilization
 - failure rate
 
@@ -413,6 +431,17 @@ Current limitations:
 - citation scoring recognizes explicit `[Document N]` references only and is disabled by default;
 - the stock trainer selects from metrics emitted by TRL/Transformers (normally `eval_loss`); custom task metrics require extending the trainer;
 - confidence intervals are unadjusted for multiple comparisons.
+- the stock answer-only trainer fails closed for thinking-enabled adapter training; thinking-enabled base/RAG inference and externally trained schema-v2 adapters remain evaluable as separate conditions;
+- the GPU workflow requires a compatible self-hosted runner and is not evidence that a particular local checkout has executed CUDA unless that job result is available;
+
+## Validation layers
+
+- **Unit tests:** core/dev dependencies; fast orchestration, failure, and statistical tests.
+- **CPU integration:** pinned real BM25, Datasets, Transformers, TRL, PEFT manifest contracts, report generation, and Compose parsing without model downloads.
+- **GPU integration:** scheduled/manual self-hosted workflow that constructs a local tiny model, trains distinct SFT/RAFT LoRA adapters, reloads them, generates, captures CUDA memory, and executes one benchmark matrix.
+
+Passing only the unit job is not described as full validation. See
+[schema-v2 migration notes](docs/migration_v2.md) for stricter adapter behavior and renamed metrics.
 
 Out of scope for v0.1:
 
