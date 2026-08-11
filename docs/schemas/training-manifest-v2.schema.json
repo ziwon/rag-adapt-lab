@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-adapt-lab.local/schemas/training-manifest-v2.schema.json",
+  "title": "rag-adapt-lab training manifest v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "adaptation_mode",
+    "model",
+    "training_prompt",
+    "chat_template_kwargs",
+    "training_dataset_fingerprint",
+    "validation_dataset_fingerprint",
+    "held_out_evaluation_sha256",
+    "training_configuration_sha256",
+    "split",
+    "loss_masking",
+    "adapter_artifact_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "adaptation_mode": {"enum": ["sft", "raft"]},
+    "model": {"type": "object"},
+    "training_prompt": {"type": "object"},
+    "chat_template_kwargs": {"type": "object"},
+    "training_dataset_fingerprint": {"type": "string"},
+    "validation_dataset_fingerprint": {"type": "string"},
+    "held_out_evaluation_sha256": {"type": "string"},
+    "training_configuration_sha256": {"type": "string"},
+    "split": {
+      "type": "object",
+      "required": [
+        "strategy",
+        "group_by",
+        "group_counts",
+        "corpus_policy",
+        "partition_fingerprints",
+        "document_overlap_count",
+        "question_overlap_count",
+        "negative_mining_scope",
+        "seed"
+      ]
+    },
+    "loss_masking": {"type": "object"},
+    "adapter_artifact_sha256": {"type": "string"}
+  }
+}

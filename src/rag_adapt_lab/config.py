@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -51,4 +52,73 @@ def validate_hf_model_config(config: dict[str, Any]) -> tuple[str, str]:
         raise ValueError(
             f"Model {model_id!r} requests trust_remote_code=true; remote model code is disabled"
         )
+    validate_thinking_configuration(config)
     return model_id, revision
+
+
+def is_qwen3_model(config: Mapping[str, Any]) -> bool:
+    """Return whether a model config identifies the Qwen3 model family."""
+    return "qwen3" in str(config.get("model_id", "")).casefold()
+
+
+def effective_chat_template_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and return the exact kwargs applied to a model chat template.
+
+    Qwen3 has a behavior-changing ``enable_thinking`` template argument.  An
+    implicit default is not a reproducible benchmark condition, so Qwen3
+    configurations must always specify it.
+    """
+    raw = config.get("chat_template_kwargs", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("chat_template_kwargs must be a mapping")
+    values = dict(raw)
+    if is_qwen3_model(config) and "enable_thinking" not in values:
+        raise ValueError(
+            "Qwen3 model configs must explicitly set "
+            "chat_template_kwargs.enable_thinking to true or false"
+        )
+    if "enable_thinking" in values and not isinstance(values["enable_thinking"], bool):
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+    if values.get("enable_thinking") is True and not is_qwen3_model(config):
+        raise ValueError("enable_thinking=true is only supported for explicit Qwen3 configs")
+    return values
+
+
+def validate_thinking_configuration(config: Mapping[str, Any]) -> bool:
+    """Validate that thinking and decoding settings form one explicit condition."""
+    chat_kwargs = effective_chat_template_kwargs(config)
+    thinking_enabled = chat_kwargs.get("enable_thinking") is True
+    generation = config.get("generation", {})
+    if not isinstance(generation, Mapping):
+        raise ValueError("generation must be a mapping")
+    do_sample = generation.get("do_sample", False)
+    if not isinstance(do_sample, bool):
+        raise ValueError("generation.do_sample must be a boolean")
+    try:
+        max_new_tokens = int(generation.get("max_new_tokens", 64))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("generation.max_new_tokens must be an integer") from exc
+    if max_new_tokens < 1:
+        raise ValueError("generation.max_new_tokens must be positive")
+
+    if is_qwen3_model(config) and not thinking_enabled and do_sample:
+        raise ValueError(
+            "The default concise Qwen3 condition requires deterministic generation "
+            "with do_sample=false"
+        )
+    if thinking_enabled:
+        if not do_sample:
+            raise ValueError(
+                "Qwen3 thinking mode is a separate sampled condition and requires do_sample=true"
+            )
+        temperature = generation.get("temperature")
+        if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
+            raise ValueError("Qwen3 thinking mode requires a positive generation.temperature")
+        if float(temperature) <= 0:
+            raise ValueError("Qwen3 thinking mode requires a positive generation.temperature")
+        if max_new_tokens < 128:
+            raise ValueError(
+                "Qwen3 thinking mode requires max_new_tokens>=128 so the final answer is not "
+                "systematically truncated"
+            )
+    return thinking_enabled

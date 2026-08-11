@@ -5,7 +5,8 @@ trust_remote_code: false
 torch_dtype: bfloat16
 attn_implementation: sdpa
 max_seq_length: 2048
+chat_template_kwargs:
+  enable_thinking: false
 generation:
-  max_new_tokens: 512
-  temperature: 0.0
+  max_new_tokens: 64
   do_sample: false

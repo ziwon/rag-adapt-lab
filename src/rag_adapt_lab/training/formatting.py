@@ -10,15 +10,12 @@ def format_sft_row(row: dict[str, Any]) -> str:
 
 
 def format_sft_user_prompt(row: dict[str, Any]) -> str:
-    instruction = str(row.get("instruction", "Answer accurately."))
-    user_input = str(row.get("input", row.get("question", "")))
-    return f"{instruction}\n\n{user_input}".strip()
+    question = str(row.get("input", row.get("question", "")))
+    return format_rag_user_prompt(question=question, contexts=[])
 
 
 def format_sft_prompt(row: dict[str, Any]) -> str:
-    instruction = row.get("instruction", "Answer accurately.")
-    user_input = row.get("input", row.get("question", ""))
-    return f"### Instruction\n{instruction}\n\n### Input\n{user_input}\n\n### Response\n"
+    return f"{format_sft_user_prompt(row)}\n\n### Response\n"
 
 
 def format_raft_user_prompt(row: dict[str, Any]) -> str:

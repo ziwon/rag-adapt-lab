@@ -1,16 +1,45 @@
 from __future__ import annotations
 
 import gc
-import json
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from rag_adapt_lab.config import validate_hf_model_config
+from rag_adapt_lab.config import (
+    effective_chat_template_kwargs,
+    validate_hf_model_config,
+    validate_thinking_configuration,
+)
+from rag_adapt_lab.provenance import AdapterVerification, validate_adapter_provenance
 
 from .base import GenerationResult, Generator
 from .prompts import format_rag_user_prompt
+
+
+def parse_thinking_output(text: str, *, thinking_enabled: bool) -> tuple[str | None, str]:
+    """Separate Qwen-style reasoning from the answer used by EM/F1.
+
+    A thinking-enabled run must produce balanced tags when it emits a thinking
+    block. Unexpected balanced tags are also stripped in the concise condition
+    so hidden reasoning can never contaminate canonical answer metrics.
+    """
+    opens = len(re.findall(r"<think>", text, flags=re.IGNORECASE))
+    closes = len(re.findall(r"</think>", text, flags=re.IGNORECASE))
+    if opens != closes:
+        condition = "thinking-enabled" if thinking_enabled else "thinking-disabled"
+        raise ValueError(f"Malformed <think> output in {condition} condition: unbalanced tags")
+    if opens == 0:
+        return None, text.strip()
+    if opens > 1:
+        raise ValueError("Malformed <think> output: multiple reasoning blocks are ambiguous")
+    match = re.search(r"<think>(.*?)</think>", text, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        raise ValueError("Malformed <think> output: reasoning block could not be parsed")
+    reasoning = match.group(1).strip()
+    answer = (text[: match.start()] + text[match.end() :]).strip()
+    return reasoning, answer
 
 
 def validate_adapter_identity(
@@ -18,32 +47,23 @@ def validate_adapter_identity(
     *,
     model_id: str,
     model_revision: str,
-) -> None:
-    """Reject adapters that declare a different base model or revision."""
-    adapter = Path(adapter_path)
-    peft_config_path = adapter / "adapter_config.json"
-    if peft_config_path.is_file():
-        peft_config = json.loads(peft_config_path.read_text(encoding="utf-8"))
-        configured_base = peft_config.get("base_model_name_or_path")
-        if configured_base and configured_base != model_id:
-            raise ValueError(
-                f"Adapter base model {configured_base!r} does not match benchmark model "
-                f"{model_id!r}"
-            )
-
-    manifest_path = adapter / "raglab_adapter_manifest.json"
-    if not manifest_path.is_file():
-        return
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    adapter_model = manifest.get("model", {})
-    configured_id = adapter_model.get("model_id")
-    configured_revision = adapter_model.get("revision")
-    if configured_id != model_id or configured_revision != model_revision:
-        raise ValueError(
-            "Adapter identity does not match the immutable benchmark base: "
-            f"adapter={configured_id}@{configured_revision}, "
-            f"benchmark={model_id}@{model_revision}"
-        )
+    expected_mode: str | None = None,
+    expected_prompt: Mapping[str, Any] | None = None,
+    held_out_evaluation_sha256: str | None = None,
+    allow_unverified: bool = False,
+) -> AdapterVerification:
+    """Compatibility wrapper around fail-closed adapter provenance validation."""
+    if expected_mode not in {None, "sft", "raft"}:
+        raise ValueError(f"Unsupported expected adapter mode: {expected_mode!r}")
+    return validate_adapter_provenance(
+        adapter_path,
+        model_id=model_id,
+        model_revision=model_revision,
+        expected_mode=expected_mode,  # type: ignore[arg-type]
+        expected_prompt=expected_prompt,
+        held_out_evaluation_sha256=held_out_evaluation_sha256,
+        allow_unverified=allow_unverified,
+    )
 
 
 class TransformersGenerator(Generator):
@@ -71,6 +91,7 @@ class TransformersGenerator(Generator):
         adapter_path: str | Path | None = None,
         load_in_4bit: bool = False,
         seed: int = 42,
+        allow_unverified_adapter: bool = False,
     ) -> None:
         try:
             import torch
@@ -86,6 +107,8 @@ class TransformersGenerator(Generator):
         model_id, revision = validate_hf_model_config(self.model_config)
         self.model_id = model_id
         self.model_revision = revision
+        self.chat_template_kwargs = effective_chat_template_kwargs(self.model_config)
+        self.thinking_enabled = validate_thinking_configuration(self.model_config)
         self.adapter_path = str(adapter_path) if adapter_path is not None else None
         self.generation_config = dict(self.model_config.get("generation", {}))
         unsupported_generation_fields = (
@@ -134,7 +157,7 @@ class TransformersGenerator(Generator):
                 ),
             )
 
-        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+        model: Any = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
         if not bool(self.generation_config.get("do_sample", False)):
             model.generation_config.do_sample = False
             model.generation_config.temperature = None
@@ -149,40 +172,52 @@ class TransformersGenerator(Generator):
                 adapter,
                 model_id=model_id,
                 model_revision=revision,
+                allow_unverified=allow_unverified_adapter,
             )
             model = PeftModel.from_pretrained(model, str(adapter))
         model.eval()
-        self.model = model
+        self.model: Any = model
 
     def _synchronize(self) -> None:
         if self.torch.cuda.is_available():
             self.torch.cuda.synchronize()
 
     def generate(self, *, question: str, contexts: list[str] | None = None) -> GenerationResult:
+        inference_started = time.perf_counter()
+        stage_started = time.perf_counter()
         user_prompt = format_rag_user_prompt(question=question, contexts=contexts or [])
-        chat_template_kwargs = dict(self.model_config.get("chat_template_kwargs", {}))
+        prompt_build_latency = time.perf_counter() - stage_started
+
+        stage_started = time.perf_counter()
         if self.tokenizer.chat_template:
             prompt = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_prompt}],
                 tokenize=False,
                 add_generation_prompt=True,
-                **chat_template_kwargs,
+                **self.chat_template_kwargs,
             )
         else:
             prompt = user_prompt
-        max_new_tokens = int(self.generation_config.get("max_new_tokens", 128))
+        chat_template_latency = time.perf_counter() - stage_started
+        max_new_tokens = int(self.generation_config.get("max_new_tokens", 64))
         configured_length = int(
             self.model_config.get("max_seq_length", self.tokenizer.model_max_length)
         )
         if max_new_tokens < 1 or configured_length <= max_new_tokens:
             raise ValueError("max_seq_length must be greater than positive max_new_tokens")
         max_input_tokens = configured_length - max_new_tokens
+        stage_started = time.perf_counter()
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
             max_length=max_input_tokens,
-        ).to(self.model.device)
+        )
+        tokenization_latency = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
+        inputs = inputs.to(self.model.device)
+        self._synchronize()
+        device_transfer_latency = time.perf_counter() - stage_started
 
         do_sample = bool(self.generation_config.get("do_sample", False))
         generation_kwargs: dict[str, Any] = {
@@ -217,16 +252,39 @@ class TransformersGenerator(Generator):
         with self.torch.inference_mode():
             outputs = self.model.generate(**inputs, **generation_kwargs)
         self._synchronize()
-        latency = time.perf_counter() - started
+        model_generate_latency = time.perf_counter() - started
         prompt_tokens = int(inputs["input_ids"].shape[1])
         generated = outputs[:, prompt_tokens:]
         output_tokens = int(generated.shape[1])
-        text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
+        stage_started = time.perf_counter()
+        raw_text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
+        reasoning, text = parse_thinking_output(
+            raw_text,
+            thinking_enabled=self.thinking_enabled,
+        )
+        reasoning_tokens = (
+            len(self.tokenizer(reasoning, add_special_tokens=False)["input_ids"])
+            if reasoning is not None
+            else 0
+        )
+        answer_tokens = len(self.tokenizer(text, add_special_tokens=False)["input_ids"])
+        decode_latency = time.perf_counter() - stage_started
+        inference_e2e_latency = time.perf_counter() - inference_started
         return GenerationResult(
             text=text,
+            raw_text=raw_text,
+            reasoning=reasoning,
             prompt_tokens=prompt_tokens,
             output_tokens=output_tokens,
-            latency_s=latency,
+            reasoning_tokens=reasoning_tokens,
+            answer_tokens=answer_tokens,
+            prompt_build_latency_s=prompt_build_latency,
+            chat_template_latency_s=chat_template_latency,
+            tokenization_latency_s=tokenization_latency,
+            device_transfer_latency_s=device_transfer_latency,
+            model_generate_latency_s=model_generate_latency,
+            decode_latency_s=decode_latency,
+            inference_e2e_latency_s=inference_e2e_latency,
         )
 
     def reset_runtime_metrics(self) -> None:
@@ -235,9 +293,18 @@ class TransformersGenerator(Generator):
             self.torch.cuda.reset_peak_memory_stats()
 
     def peak_memory_gb(self) -> float | None:
+        """Deprecated allocated-memory alias retained for older callers."""
+        return self.peak_allocated_vram_gb()
+
+    def peak_allocated_vram_gb(self) -> float | None:
         if not self.torch.cuda.is_available():
             return None
         return float(self.torch.cuda.max_memory_allocated() / 1024**3)
+
+    def peak_reserved_vram_gb(self) -> float | None:
+        if not self.torch.cuda.is_available():
+            return None
+        return float(self.torch.cuda.max_memory_reserved() / 1024**3)
 
     def close(self) -> None:
         self.model = None

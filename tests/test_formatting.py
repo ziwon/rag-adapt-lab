@@ -3,6 +3,7 @@ from rag_adapt_lab.training.formatting import (
     format_raft_prompt,
     format_raft_row,
     format_raft_user_prompt,
+    format_sft_user_prompt,
 )
 
 
@@ -38,3 +39,25 @@ def test_training_and_inference_share_the_same_rag_prompt() -> None:
     assert "(no documents provided)" in base_prompt
     assert "### Question\nNo retrieval" in base_prompt
     assert base_prompt.endswith("### Documents\n(no documents provided)")
+    assert format_sft_user_prompt({"input": "No retrieval"}) == base_prompt
+
+
+def test_sft_and_raft_differ_only_by_supplied_contexts() -> None:
+    question = "What happened?"
+    sft = format_sft_user_prompt({"input": question, "instruction": "Ignore this variant"})
+    raft = format_raft_user_prompt(
+        {
+            "question": question,
+            "contexts": [
+                {"text": "positive", "relevant": True, "oracle": "secret"},
+                {"text": "distractor", "relevant": False},
+            ],
+        }
+    )
+    assert sft == format_rag_user_prompt(question=question, contexts=[])
+    assert raft == format_rag_user_prompt(
+        question=question,
+        contexts=["positive", "distractor"],
+    )
+    assert '"relevant"' not in raft.casefold()
+    assert "oracle" not in raft.casefold()
