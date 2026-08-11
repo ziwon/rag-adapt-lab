@@ -31,6 +31,8 @@ def evaluate_retriever(
     *,
     top_k: int = 5,
 ) -> RetrievalMetrics:
+    if top_k < 1:
+        raise ValueError("top_k must be positive")
     recalls: list[float] = []
     hits: list[float] = []
     reciprocal_ranks: list[float] = []
@@ -41,7 +43,18 @@ def evaluate_retriever(
         if not relevant:
             continue
         results = retriever.search(example.question, top_k=top_k)
-        ranked_ids = [item.document.id for item in results]
+        ranked_ids = [item.document.id for item in results[:top_k]]
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for doc_id in ranked_ids:
+            if doc_id in seen:
+                duplicates.add(doc_id)
+            seen.add(doc_id)
+        if duplicates:
+            raise ValueError(
+                f"Retriever returned duplicate document IDs for example {example.id!r}: "
+                f"{sorted(duplicates)}"
+            )
         found = [doc_id for doc_id in ranked_ids if doc_id in relevant]
 
         recalls.append(len(set(found)) / len(relevant))
