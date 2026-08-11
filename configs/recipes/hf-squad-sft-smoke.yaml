@@ -1,0 +1,13 @@
+name: hf-squad-sft-chat-smoke
+model: ../models/qwen2.5-0.5b-instruct.yaml
+retrieval:
+  enabled: true
+  config: ../retrievers/bm25.yaml
+training:
+  enabled: true
+  mode: sft
+  config: ../training/lora-smoke.yaml
+output_dir: outputs/hf-squad-sft-chat-smoke
+tracking:
+  backend: null
+  weave: false

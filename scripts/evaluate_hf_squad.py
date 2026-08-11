@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import statistics
 import time
 from pathlib import Path
@@ -17,6 +16,7 @@ from rag_adapt_lab.config import load_yaml, validate_hf_model_config
 from rag_adapt_lab.data.io import load_documents, load_eval, write_jsonl
 from rag_adapt_lab.evaluation.generation import exact_match, normalize_text, token_f1
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
+from rag_adapt_lab.evaluation.statistics import paired_bootstrap_delta
 from rag_adapt_lab.generation.prompts import format_rag_user_prompt
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
 
@@ -44,38 +44,23 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, float | int]:
     }
 
 
-def paired_bootstrap_delta(
+def paired_condition_delta(
     rows: list[dict[str, Any]],
     *,
     condition: str,
     metric: str,
     samples: int = 20_000,
     seed: int = 42,
-) -> dict[str, float | int]:
-    base = {
-        row["id"]: float(row[metric])
-        for row in rows
-        if row["condition"] == condition and row["model"] == "base"
-    }
-    tuned = {
-        row["id"]: float(row[metric])
-        for row in rows
-        if row["condition"] == condition and row["model"] == "tuned"
-    }
-    if base.keys() != tuned.keys() or not base:
-        raise ValueError(f"Cannot pair {condition}/{metric} evaluation rows")
-    deltas = [tuned[row_id] - base[row_id] for row_id in sorted(base)]
-    rng = random.Random(seed)
-    means = [
-        statistics.fmean(deltas[rng.randrange(len(deltas))] for _ in deltas) for _ in range(samples)
-    ]
-    means.sort()
-    return {
-        "delta": statistics.fmean(deltas),
-        "ci95_low": means[int(0.025 * samples)],
-        "ci95_high": means[int(0.975 * samples)],
-        "bootstrap_samples": samples,
-    }
+) -> dict[str, float | int | bool | str]:
+    baseline = [row for row in rows if row["condition"] == condition and row["model"] == "base"]
+    candidate = [row for row in rows if row["condition"] == condition and row["model"] == "tuned"]
+    return paired_bootstrap_delta(
+        baseline,
+        candidate,
+        metric=metric,
+        samples=samples,
+        seed=seed,
+    )
 
 
 def run_generation(
@@ -251,7 +236,7 @@ def main() -> None:
     }
     summary["paired_bootstrap"] = {
         condition: {
-            metric: paired_bootstrap_delta(
+            metric: paired_condition_delta(
                 all_rows,
                 condition=condition,
                 metric=metric,

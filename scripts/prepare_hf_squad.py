@@ -100,6 +100,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-examples", type=int, default=40)
     parser.add_argument("--eval-documents", type=int, default=100)
     parser.add_argument("--distractors", type=int, default=1)
+    parser.add_argument(
+        "--negative-strategy",
+        choices=("random", "bm25-hard-negative"),
+        default="bm25-hard-negative",
+    )
+    parser.add_argument("--hard-negative-candidates", type=int, default=20)
     parser.add_argument("--max-context-chars", type=int, default=1200)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -137,7 +143,19 @@ def main() -> None:
         train_examples,
         distractors=args.distractors,
         seed=args.seed,
+        negative_strategy=args.negative_strategy,
+        candidate_pool_size=args.hard_negative_candidates,
     )
+    sft_rows = [
+        {
+            "id": example.id,
+            "instruction": "Answer the question accurately and return only the concise answer.",
+            "input": example.question,
+            "output": example.reference_answer,
+            "metadata": example.metadata,
+        }
+        for example in train_examples
+    ]
     eval_documents = make_documents(validation_rows, "eval-doc")
     eval_examples = make_examples(validation_rows[: args.eval_examples], "eval")
 
@@ -145,6 +163,7 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(args.output_dir / "train_documents.jsonl", train_documents)
+    write_jsonl(args.output_dir / "sft_train.jsonl", sft_rows)
     write_jsonl(args.output_dir / "raft_train.jsonl", raft_rows)
     write_jsonl(args.output_dir / "eval_documents.jsonl", eval_documents)
     write_jsonl(args.output_dir / "eval.jsonl", eval_examples)
@@ -154,9 +173,12 @@ def main() -> None:
         "license": "cc-by-sa-4.0",
         "seed": args.seed,
         "train_examples": len(raft_rows),
+        "sft_examples": len(sft_rows),
         "eval_examples": len(eval_examples),
         "eval_documents": len(eval_documents),
         "distractors_per_train_example": args.distractors,
+        "negative_strategy": args.negative_strategy,
+        "hard_negative_candidates": args.hard_negative_candidates,
         "max_context_chars": args.max_context_chars,
         "train_eval_context_overlap": len(
             train_contexts & {row["context"] for row in validation_rows}
