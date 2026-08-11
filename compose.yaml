@@ -1,0 +1,201 @@
+name: rag-adapt-lab
+
+x-lab-environment: &lab-environment
+  WANDB_BASE_URL: http://wandb:8080
+  WANDB_API_KEY: ${WANDB_API_KEY:-}
+  WANDB_PROJECT: ${WANDB_PROJECT:-rag-adapt-lab}
+  WANDB_ENTITY: ${WANDB_ENTITY:-}
+  WANDB_MODE: ${WANDB_MODE:-online}
+  WANDB_SILENT: "true"
+  WEAVE_PROJECT: ${WEAVE_PROJECT:-rag-adapt-lab}
+  HF_HOME: /cache/huggingface
+  HF_DATASETS_CACHE: /cache/huggingface/datasets
+  TOKENIZERS_PARALLELISM: "false"
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-raglab-local}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-raglab-local-secret}
+  AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+  AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+  S3_ENDPOINT_URL: http://seaweedfs:8333
+  S3_BUCKET: ${S3_BUCKET:-rag-adapt-lab}
+
+x-lab-service: &lab-service
+  image: ${RAGLAB_IMAGE:-rag-adapt-lab:0.1.0-local}
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  init: true
+  working_dir: /workspace/rag-adapt-lab
+  environment: *lab-environment
+  volumes:
+    - ./data:/workspace/rag-adapt-lab/data
+    - ./outputs:/workspace/rag-adapt-lab/outputs
+    - huggingface_cache:/cache/huggingface
+  depends_on:
+    seaweed-init:
+      condition: service_completed_successfully
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  seaweedfs:
+    image: ${SEAWEEDFS_IMAGE:-chrislusf/seaweedfs:4.41@sha256:43b768cd62b00d132439cda881b93fd1adebf1b315e996e794087743821d771d}
+    command:
+      - server
+      - -ip=seaweedfs
+      - -dir=/data
+      - -master.telemetry=false
+      - -master.volumeSizeLimitMB=1024
+      - -s3
+      - -s3.port=8333
+      - -s3.allowedOrigins=http://localhost:${WANDB_PORT:-8080}
+      - -s3.externalUrl=http://seaweedfs:8333
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-raglab-local}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-raglab-local-secret}
+    ports:
+      - 127.0.0.1:${SEAWEEDFS_S3_PORT:-8333}:8333
+      - 127.0.0.1:${SEAWEEDFS_FILER_PORT:-8888}:8888
+      - 127.0.0.1:${SEAWEEDFS_MASTER_PORT:-9333}:9333
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: [CMD-SHELL, "wget --quiet --spider http://127.0.0.1:9333/cluster/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  seaweed-init:
+    image: ${AWS_CLI_IMAGE:-amazon/aws-cli:2.36.20@sha256:8af59c0d96b104000cce4f11e211c06385240d72c515198159041f13ebe459fa}
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-raglab-local}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-raglab-local-secret}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_EC2_METADATA_DISABLED: "true"
+      S3_BUCKET: ${S3_BUCKET:-rag-adapt-lab}
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        if ! aws --endpoint-url http://seaweedfs:8333 s3api head-bucket \
+          --bucket "$${S3_BUCKET}" >/dev/null 2>&1; then
+          aws --endpoint-url http://seaweedfs:8333 s3api create-bucket \
+            --bucket "$${S3_BUCKET}"
+        fi
+        aws --endpoint-url http://seaweedfs:8333 s3api head-bucket \
+          --bucket "$${S3_BUCKET}"
+    restart: "no"
+
+  wandb:
+    image: ${WANDB_IMAGE:-wandb/local:0.83.0@sha256:b234c9d084b65164598da6fa5f17d38ec71137b037c059b46889c1495b008c52}
+    platform: linux/amd64
+    depends_on:
+      seaweed-init:
+        condition: service_completed_successfully
+    environment:
+      HOST: ${WANDB_HOST:-http://localhost:8080}
+      LICENSE: ${WANDB_LICENSE:-}
+      BUCKET: s3://${S3_ACCESS_KEY:-raglab-local}:${S3_SECRET_KEY:-raglab-local-secret}@seaweedfs:8333/${S3_BUCKET:-rag-adapt-lab}?tls=false
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BUCKET_QUEUE: internal://
+      BUCKET_PROXY: "true"
+      GORILLA_FILE_STORE_IS_PROXIED: "true"
+      GORILLA_GLUE_FILE_STORE_IS_PROXIED: "true"
+      GORILLA_ALLOW_USER_TEAM_CREATION: "true"
+      LOGGING_ENABLED: "true"
+    ports:
+      - 127.0.0.1:${WANDB_PORT:-8080}:8080
+    volumes:
+      - wandb_data:/vol
+    healthcheck:
+      test: [CMD-SHELL, "wget --quiet --spider http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    stop_grace_period: 60s
+    restart: unless-stopped
+
+  lab:
+    <<: [*lab-service, *gpu]
+    profiles: [lab]
+    depends_on:
+      seaweed-init:
+        condition: service_completed_successfully
+      wandb:
+        condition: service_healthy
+    command: [sleep, infinity]
+    stdin_open: true
+    tty: true
+
+  prepare:
+    <<: *lab-service
+    profiles: [jobs]
+    command:
+      - python
+      - scripts/prepare_hf_squad.py
+      - --output-dir
+      - data/hf_squad_smoke
+      - --cache-dir
+      - /cache/huggingface/datasets
+      - --train-examples
+      - ${TRAIN_EXAMPLES:-256}
+      - --eval-examples
+      - ${EVAL_EXAMPLES:-40}
+      - --eval-documents
+      - ${EVAL_DOCUMENTS:-100}
+      - --distractors
+      - ${RAFT_DISTRACTORS:-1}
+
+  train:
+    <<: [*lab-service, *gpu]
+    profiles: [jobs]
+    command:
+      - raglab
+      - train
+      - --config
+      - ${TRAIN_RECIPE:-configs/recipes/hf-squad-raft-smoke.yaml}
+      - --train-file
+      - ${TRAIN_FILE:-data/hf_squad_smoke/raft_train.jsonl}
+
+  evaluate:
+    <<: [*lab-service, *gpu]
+    profiles: [jobs]
+    command:
+      - python
+      - scripts/evaluate_hf_squad.py
+      - --model-config
+      - ${MODEL_CONFIG:-configs/models/qwen2.5-0.5b-instruct.yaml}
+      - --adapter
+      - ${ADAPTER_PATH:-outputs/hf-squad-raft-chat-smoke/adapter}
+      - --documents
+      - ${EVAL_DOCUMENTS_FILE:-data/hf_squad_smoke/eval_documents.jsonl}
+      - --eval-set
+      - ${EVAL_FILE:-data/hf_squad_smoke/eval.jsonl}
+      - --output-dir
+      - ${EVAL_OUTPUT_DIR:-outputs/hf-squad-raft-chat-smoke/evaluation}
+
+  tracking-smoke:
+    <<: *lab-service
+    profiles: [smoke]
+    depends_on:
+      seaweed-init:
+        condition: service_completed_successfully
+      wandb:
+        condition: service_healthy
+    command: [python, scripts/smoke_tracking.py]
+
+volumes:
+  huggingface_cache:
+  seaweedfs_data:
+  wandb_data:
