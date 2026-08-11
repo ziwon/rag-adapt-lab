@@ -1,0 +1,6 @@
+name: dense
+kind: dense
+model_id: Qwen/Qwen3-Embedding-0.6B
+top_k: 5
+normalize_embeddings: true
+batch_size: 16

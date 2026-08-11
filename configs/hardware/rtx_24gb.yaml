@@ -1,0 +1,13 @@
+name: rtx_24gb
+max_vram_gb: 24
+recommended_model_size: "8B-14B"
+training:
+  load_in_4bit: true
+  gradient_checkpointing: true
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  max_seq_length: 3072
+  bf16: true
+notes:
+  - "8B is the canonical benchmark tier."
+  - "14B is an extension target; reduce sequence length if memory is tight."

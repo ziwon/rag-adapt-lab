@@ -1,0 +1,2 @@
+{"id":"sft-001","instruction":"Answer concisely and accurately.","input":"What is BM25?","output":"BM25 is a sparse lexical retrieval method that ranks documents using term-frequency and inverse-document-frequency style statistics."}
+{"id":"sft-002","instruction":"Answer concisely and accurately.","input":"What is QLoRA?","output":"QLoRA fine-tunes low-rank adapters while keeping the base model quantized, typically at 4-bit precision, to reduce memory use."}

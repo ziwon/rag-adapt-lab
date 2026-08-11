@@ -1,0 +1,4 @@
+name: bm25
+kind: bm25
+top_k: 5
+lowercase: true

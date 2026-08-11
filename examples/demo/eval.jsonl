@@ -1,0 +1,3 @@
+{"id":"q-001","question":"What does BM25 use for retrieval?","reference_answer":"BM25 uses sparse lexical term statistics such as term frequency and inverse document frequency.","relevant_doc_ids":["doc-002"],"metadata":{"difficulty":"easy"}}
+{"id":"q-002","question":"Why can QLoRA reduce memory use during fine-tuning?","reference_answer":"It keeps the base model quantized to 4-bit and trains low-rank adapters instead of all model weights.","relevant_doc_ids":["doc-003"],"metadata":{"difficulty":"easy"}}
+{"id":"q-003","question":"What behavior does RAFT try to teach?","reference_answer":"It teaches the model to use relevant retrieved evidence and ignore distractor documents.","relevant_doc_ids":["doc-004"],"metadata":{"difficulty":"easy"}}

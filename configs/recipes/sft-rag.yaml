@@ -1,0 +1,13 @@
+name: sft-rag
+model: ../models/qwen3-8b.yaml
+retrieval:
+  enabled: true
+  config: ../retrievers/bm25.yaml
+training:
+  enabled: true
+  mode: sft
+  config: ../training/qlora-16gb.yaml
+output_dir: outputs/qwen3-8b-sft-rag
+tracking:
+  backend: wandb
+  weave: true

@@ -1,0 +1,10 @@
+name: rag
+model: ../models/qwen3-8b.yaml
+retrieval:
+  enabled: true
+  config: ../retrievers/bm25.yaml
+training:
+  enabled: false
+tracking:
+  backend: wandb
+  weave: true

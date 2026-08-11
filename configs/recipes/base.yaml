@@ -1,0 +1,9 @@
+name: base
+model: ../models/qwen3-8b.yaml
+retrieval:
+  enabled: false
+training:
+  enabled: false
+tracking:
+  backend: wandb
+  weave: true

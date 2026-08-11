@@ -1,0 +1,4 @@
+{"id":"doc-001","text":"Vector search retrieves semantically similar passages by comparing dense embeddings.","metadata":{"source":"demo","topic":"retrieval"}}
+{"id":"doc-002","text":"BM25 is a sparse lexical retrieval method based on term frequency and inverse document frequency.","metadata":{"source":"demo","topic":"retrieval"}}
+{"id":"doc-003","text":"QLoRA fine-tunes low-rank adapters while the base model is loaded with 4-bit quantization to reduce memory usage.","metadata":{"source":"demo","topic":"training"}}
+{"id":"doc-004","text":"RAFT trains a model to answer with relevant retrieved evidence while learning to ignore distractor documents.","metadata":{"source":"demo","topic":"training"}}

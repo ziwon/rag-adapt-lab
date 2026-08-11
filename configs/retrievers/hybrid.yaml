@@ -1,0 +1,6 @@
+name: hybrid
+kind: hybrid
+sparse_weight: 0.5
+dense_weight: 0.5
+top_k: 5
+# v0.1 defines the configuration surface; implement your preferred rank fusion backend.

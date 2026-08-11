@@ -1,0 +1,13 @@
+name: rtx_16gb
+max_vram_gb: 16
+recommended_model_size: "4B-8B"
+training:
+  load_in_4bit: true
+  gradient_checkpointing: true
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  max_seq_length: 2048
+  bf16: true
+notes:
+  - "Use 4B for smoke tests and 8B as the primary QLoRA target."
+  - "Reduce max_seq_length before reducing LoRA rank when OOM occurs."

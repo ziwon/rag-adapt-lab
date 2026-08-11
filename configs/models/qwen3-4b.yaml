@@ -1,0 +1,11 @@
+name: qwen3-4b
+model_id: Qwen/Qwen3-4B
+revision: main
+trust_remote_code: true
+torch_dtype: bfloat16
+attn_implementation: sdpa
+max_seq_length: 2048
+generation:
+  max_new_tokens: 512
+  temperature: 0.0
+  do_sample: false
