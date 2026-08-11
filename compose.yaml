@@ -156,6 +156,10 @@ services:
       - ${EVAL_DOCUMENTS:-100}
       - --distractors
       - ${RAFT_DISTRACTORS:-1}
+      - --negative-strategy
+      - ${RAFT_NEGATIVE_STRATEGY:-bm25-hard-negative}
+      - --hard-negative-candidates
+      - ${RAFT_HARD_NEGATIVE_CANDIDATES:-20}
 
   train:
     <<: [*lab-service, *gpu]
@@ -167,6 +171,8 @@ services:
       - ${TRAIN_RECIPE:-configs/recipes/hf-squad-raft-smoke.yaml}
       - --train-file
       - ${TRAIN_FILE:-data/hf_squad_smoke/raft_train.jsonl}
+      - --held-out-eval
+      - ${EVAL_FILE:-data/hf_squad_smoke/eval.jsonl}
 
   evaluate:
     <<: [*lab-service, *gpu]
@@ -184,6 +190,41 @@ services:
       - ${EVAL_FILE:-data/hf_squad_smoke/eval.jsonl}
       - --output-dir
       - ${EVAL_OUTPUT_DIR:-outputs/hf-squad-raft-chat-smoke/evaluation}
+
+  benchmark:
+    <<: [*lab-service, *gpu]
+    profiles: [jobs]
+    command:
+      - raglab
+      - benchmark
+      - --recipes
+      - base,rag,sft-rag,raft-rag
+      - --model-config
+      - ${MODEL_CONFIG:-configs/models/qwen2.5-0.5b-instruct.yaml}
+      - --documents
+      - ${EVAL_DOCUMENTS_FILE:-data/hf_squad_smoke/eval_documents.jsonl}
+      - --eval-set
+      - ${EVAL_FILE:-data/hf_squad_smoke/eval.jsonl}
+      - --retriever-config
+      - ${RETRIEVER_CONFIG:-configs/retrievers/bm25.yaml}
+      - --scorer-config
+      - ${SCORER_CONFIG:-configs/scorers/default.yaml}
+      - --sft-adapter
+      - ${SFT_ADAPTER_PATH:-outputs/hf-squad-sft-chat-smoke/adapter}
+      - --raft-adapter
+      - ${RAFT_ADAPTER_PATH:-outputs/hf-squad-raft-chat-smoke/adapter}
+      - --output-dir
+      - ${BENCHMARK_OUTPUT_DIR:-outputs/hf-squad-benchmark}
+      - --top-k
+      - ${BENCHMARK_TOP_K:-5}
+      - --bootstrap-samples
+      - ${BOOTSTRAP_SAMPLES:-10000}
+      - --seed
+      - ${BENCHMARK_SEED:-42}
+      - --warmup-examples
+      - ${BENCHMARK_WARMUP_EXAMPLES:-1}
+      - --tracking-backend
+      - ${BENCHMARK_TRACKING_BACKEND:-none}
 
   tracking-smoke:
     <<: *lab-service
