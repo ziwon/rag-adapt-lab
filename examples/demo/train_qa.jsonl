@@ -1,0 +1,2 @@
+{"id":"train-q-001","question":"Which retrieval approach compares dense embeddings?","reference_answer":"Vector search compares dense embeddings to retrieve semantically similar passages.","relevant_doc_ids":["doc-001"],"metadata":{"split":"train"}}
+{"id":"train-q-002","question":"Which model parameters are updated during QLoRA?","reference_answer":"QLoRA updates low-rank adapters while keeping the quantized base model fixed.","relevant_doc_ids":["doc-003"],"metadata":{"split":"train"}}

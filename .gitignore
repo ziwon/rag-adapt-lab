@@ -10,11 +10,12 @@ build/
 dist/
 *.egg-info/
 .env
-wandb/
-.weave/
-data/
-outputs/
-checkpoints/
+/.env.compose
+/wandb/
+/.weave/
+/data/
+/outputs/
+/checkpoints/
 *.safetensors
 *.bin
 .idea/

@@ -7,8 +7,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from rag_adapt_lab.data.io import load_documents, load_eval, write_jsonl
+from rag_adapt_lab.data.io import load_documents, load_eval, load_qa_examples, write_jsonl
 from rag_adapt_lab.data.raft import build_raft_examples
+from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
@@ -25,7 +26,9 @@ def validate_data(
     docs = load_documents(documents)
     eval_rows = load_eval(eval_set)
     doc_ids = {doc.id for doc in docs}
-    missing = sorted({doc_id for row in eval_rows for doc_id in row.relevant_doc_ids if doc_id not in doc_ids})
+    missing = sorted(
+        {doc_id for row in eval_rows for doc_id in row.relevant_doc_ids if doc_id not in doc_ids}
+    )
     if missing:
         raise typer.BadParameter(f"Eval set references missing document IDs: {missing[:10]}")
     console.print(f"[green]OK[/green] {len(docs)} documents, {len(eval_rows)} eval examples")
@@ -34,14 +37,33 @@ def validate_data(
 @app.command("prepare-raft")
 def prepare_raft(
     documents: Path = typer.Option(..., exists=True, readable=True),
-    eval_set: Path = typer.Option(..., "--eval-set", exists=True, readable=True),
+    training_set: Path = typer.Option(
+        ...,
+        "--training-set",
+        exists=True,
+        readable=True,
+        help="Labeled QA examples reserved for training.",
+    ),
+    held_out_eval: Path | None = typer.Option(
+        None,
+        "--held-out-eval",
+        exists=True,
+        readable=True,
+        help="Optional held-out split checked for overlapping IDs and questions.",
+    ),
     output: Path = typer.Option(...),
     distractors: int = typer.Option(2, min=0, max=20),
     seed: int = typer.Option(42),
 ) -> None:
+    training_examples = load_qa_examples(training_set)
+    if held_out_eval is not None:
+        try:
+            ensure_disjoint_qa_splits(training_examples, load_eval(held_out_eval))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--training-set") from exc
     rows = build_raft_examples(
         load_documents(documents),
-        load_eval(eval_set),
+        training_examples,
         distractors=distractors,
         seed=seed,
     )
@@ -59,7 +81,9 @@ def eval_retrieval(
     docs = load_documents(documents)
     examples = load_eval(eval_set)
     if retriever != "bm25":
-        raise typer.BadParameter("The CLI v0.1 wires BM25 directly. Dense/hybrid are extension backends.")
+        raise typer.BadParameter(
+            "The CLI v0.1 wires BM25 directly. Dense/hybrid are extension backends."
+        )
     backend = BM25Retriever()
     backend.index(docs)
     metrics = evaluate_retriever(backend, examples, top_k=top_k)
