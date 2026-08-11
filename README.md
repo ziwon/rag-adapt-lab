@@ -1,6 +1,6 @@
 # rag-adapt-lab
 
-A domain-neutral, W&B-first research harness for answering a practical question:
+A domain-neutral, reproducible research harness for answering a practical question:
 
 > **When is plain RAG enough, and when does domain adaptation (SFT or RAFT) provide measurable value?**
 
@@ -14,7 +14,7 @@ A domain-neutral, W&B-first research harness for answering a practical question:
 3. **SFT + RAG** — QLoRA/SFT domain adaptation followed by RAG
 4. **RAFT + RAG** — retrieval-aware fine-tuning with positive evidence and distractors, followed by RAG
 
-The project uses **Weights & Biases Models** for training/config/checkpoint/dataset lineage and **W&B Weave** for RAG/LLM tracing and application-level evaluation. Tracking is abstracted so the core experiment code remains usable without W&B.
+The project can use **Weights & Biases Models** for training/config/checkpoint/dataset lineage and **W&B Weave** for RAG/LLM tracing. Both are optional: the benchmark, metrics, predictions, confidence intervals, and reports work locally without a tracking service.
 
 ## Why this project exists
 
@@ -48,10 +48,12 @@ rag-adapt-lab/
 │   ├── models/
 │   ├── recipes/
 │   ├── retrievers/
+│   ├── scorers/
 │   └── training/
 ├── examples/demo/
 ├── src/rag_adapt_lab/
 │   ├── data/
+│   ├── benchmark/
 │   ├── evaluation/
 │   ├── generation/
 │   ├── recipes/
@@ -125,7 +127,7 @@ pip install -e '.[rag,train,wandb,dev]'
 
 > Install the PyTorch build that matches your CUDA driver first when needed. The project intentionally does not pin a CUDA-specific wheel URL.
 
-### 2. Configure W&B
+### 2. Optionally configure W&B
 
 ```bash
 cp .env.example .env
@@ -162,10 +164,13 @@ raglab prepare-raft \
   --training-set examples/demo/train_qa.jsonl \
   --held-out-eval examples/demo/eval.jsonl \
   --output data/raft_train.jsonl \
-  --distractors 2
+  --distractors 2 \
+  --negative-strategy bm25-hard-negative \
+  --candidate-pool-size 20 \
+  --seed 42
 ```
 
-This basic builder uses training-only relevant document annotations as oracle evidence and samples non-relevant documents as distractors. The relevance labels remain dataset metadata and are not rendered into the model prompt. For production research, replace the random sampler with BM25/dense hard negatives.
+`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. Mining metadata records the strategy, seed, candidate ranks, and scores; relevance labels are never rendered into the training prompt. The builder also accepts an injected retriever, which is the extension point for dense or hybrid mining.
 
 ### 5. Run retrieval evaluation
 
@@ -182,7 +187,8 @@ raglab eval-retrieval \
 ```bash
 raglab train \
   --config configs/recipes/sft-rag.yaml \
-  --train-file examples/demo/sft.jsonl
+  --train-file examples/demo/sft.jsonl \
+  --held-out-eval examples/demo/eval.jsonl
 ```
 
 For RAFT:
@@ -190,24 +196,55 @@ For RAFT:
 ```bash
 raglab train \
   --config configs/recipes/raft-rag.yaml \
-  --train-file data/raft_train.jsonl
+  --train-file data/raft_train.jsonl \
+  --held-out-eval examples/demo/eval.jsonl
 ```
+
+Training configs default to a seeded validation split. Supply `--validation-file` to use a separate validation file instead. In both cases, `--held-out-eval` is used only for overlap checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint by validation metric, saves the resulting adapter, and writes `training_manifest.json` with split fingerprints, IDs, seed, metrics, and best-checkpoint information. Each adapter also receives `raglab_adapter_manifest.json`; the benchmark enforces its pinned model ID/revision before loading it.
+
+SFT and RAFT records are passed to TRL as prompt/completion datasets with `completion_only_loss: true`. Prompt, document, and instruction tokens are masked from the loss; only assistant/completion tokens are training targets. Oracle relevance flags in RAFT JSONL are also excluded from the rendered prompt.
 
 ### 7. Run the benchmark matrix
 
-`benchmark` currently creates and validates an experiment plan. The model execution hooks are deliberately modular so you can attach Transformers, vLLM, SGLang, or an OpenAI-compatible endpoint without rewriting evaluation code.
+Train the SFT and RAFT adapters first, then execute all four conditions against one held-out set:
 
 ```bash
 raglab benchmark \
   --recipes base,rag,sft-rag,raft-rag \
   --model-config configs/models/qwen3-8b.yaml \
   --documents examples/demo/documents.jsonl \
-  --eval-set examples/demo/eval.jsonl
+  --eval-set examples/demo/eval.jsonl \
+  --retriever-config configs/retrievers/bm25.yaml \
+  --scorer-config configs/scorers/default.yaml \
+  --sft-adapter outputs/qwen3-8b-sft-rag/adapter \
+  --raft-adapter outputs/qwen3-8b-raft-rag/adapter \
+  --top-k 3 \
+  --bootstrap-samples 10000 \
+  --output-dir outputs/demo-benchmark
 ```
+
+The runner builds the retrieval index once, caches one ranking per evaluation example, and holds the model revision, prompt version, retrieval results, generation settings, and scorer versions fixed. Base and RAG share the same loaded base model; adapted recipes load their PEFT adapters on that same revision. A fixed per-example sampling seed schedule and unmeasured warm-up make paired quality and latency comparisons less confounded.
+
+Outputs include:
+
+- `predictions/<recipe>.jsonl` and combined `predictions.jsonl`, including retrieved IDs/scores, timings, token counts, and all per-example scores;
+- `summary.json`, containing aggregate metrics, configuration/input hashes, and paired percentile-bootstrap intervals;
+- `report.md`, containing the recipe table, retrieval quality, decision-oriented comparisons, latency, throughput, and peak GPU VRAM.
+
+Use `--dry-run --plan-output outputs/benchmark-plan.json` to validate and save a plan without loading a model. W&B logging is opt-in with `--tracking-backend wandb`; the default is local-only.
+
+The default scorer combines deterministic reference correctness with an explicitly labeled lexical groundedness/unsupported-claim heuristic. An optional versioned LLM judge can target any OpenAI-compatible endpoint:
+
+```bash
+cp configs/scorers/openai-compatible.example.yaml configs/scorers/local-judge.yaml
+export JUDGE_API_KEY=local
+```
+
+The Python scorer API also accepts `CallableJudgeBackend` for an in-process local model. Set `mode: disabled` (or use `configs/scorers/noop.yaml`) to disable plugin scores; exact match and token F1 remain active. Optional `[Document N]` citation precision/recall can be enabled with `citation_metrics: true` when the evaluated prompt/model is designed to emit citations.
 
 ### Public Hugging Face smoke experiment
 
-The included SQuAD workflow pins the public dataset and base-model revisions, creates disjoint training/evaluation splits, trains a small LoRA adapter, and compares paired base/tuned predictions:
+The included SQuAD workflow pins the public dataset and base-model revisions, creates disjoint training/evaluation splits, trains ordinary SFT and RAFT LoRA adapters, and executes the paired four-recipe comparison:
 
 ```bash
 python scripts/prepare_hf_squad.py \
@@ -215,15 +252,24 @@ python scripts/prepare_hf_squad.py \
   --cache-dir .cache/huggingface
 
 raglab train \
-  --config configs/recipes/hf-squad-raft-smoke.yaml \
-  --train-file data/hf_squad_smoke/raft_train.jsonl
+  --config configs/recipes/hf-squad-sft-smoke.yaml \
+  --train-file data/hf_squad_smoke/sft_train.jsonl \
+  --held-out-eval data/hf_squad_smoke/eval.jsonl
 
-python scripts/evaluate_hf_squad.py \
+raglab train \
+  --config configs/recipes/hf-squad-raft-smoke.yaml \
+  --train-file data/hf_squad_smoke/raft_train.jsonl \
+  --held-out-eval data/hf_squad_smoke/eval.jsonl
+
+raglab benchmark \
+  --recipes base,rag,sft-rag,raft-rag \
   --model-config configs/models/qwen2.5-0.5b-instruct.yaml \
-  --adapter outputs/hf-squad-raft-chat-smoke/adapter \
   --documents data/hf_squad_smoke/eval_documents.jsonl \
   --eval-set data/hf_squad_smoke/eval.jsonl \
-  --output-dir outputs/hf-squad-raft-chat-smoke/evaluation
+  --retriever-config configs/retrievers/bm25.yaml \
+  --sft-adapter outputs/hf-squad-sft-chat-smoke/adapter \
+  --raft-adapter outputs/hf-squad-raft-chat-smoke/adapter \
+  --output-dir outputs/hf-squad-benchmark
 ```
 
 Training and evaluation require the `train` and `rag` extras; model evaluation requires CUDA.
@@ -277,14 +323,14 @@ A recommended experiment is:
 
 ### Generation metrics
 
-The core package provides deterministic building blocks and an interface for model-based scorers:
+The core package provides deterministic metrics and complementary scorer plugins:
 
 - exact match / normalized exact match
 - token F1
-- answer correctness (judge/plugin)
-- groundedness / faithfulness (judge/plugin)
-- citation precision / recall (plugin)
-- unsupported-claim rate (plugin)
+- reference answer correctness (deterministic token overlap)
+- lexical groundedness / unsupported-claim rate (deterministic heuristic)
+- answer correctness, groundedness, and unsupported-claim rate (optional LLM judge)
+- citation precision / recall for `[Document N]` citations (optional deterministic plugin)
 
 ### System metrics
 
@@ -350,17 +396,23 @@ The repository follows four rules:
 
 ## Extending the project
 
-Good next additions after v0.1:
+Useful next additions:
 
-- Qwen3 Embedding / BGE-M3 dense retrievers
-- hard-negative mining for RAFT
 - hybrid retrieval and reranking
-- Transformers generation runner
-- vLLM and SGLang OpenAI-compatible runners
-- local LLM-as-a-judge
-- Weave evaluation datasets/scorers
+- batched Transformers generation and vLLM/SGLang benchmark factories
+- semantic claim decomposition for stronger local groundedness scoring
+- judge calibration against human labels and inter-judge agreement reporting
+- multiple-comparison corrections when many recipes or metrics are explored
 - MLflow tracker/tracer backend
-- benchmark report generation
+
+Current limitations:
+
+- the CLI benchmark uses sequential, batch-size-one Transformers generation; alternative generator factories can be injected in Python, but vLLM/SGLang are not yet CLI-selectable;
+- BM25 is the only named hard-negative strategy; dense and hybrid mining require an injected retriever;
+- lexical groundedness is a reproducible heuristic, not semantic entailment, and LLM judges require task-specific human calibration;
+- citation scoring recognizes explicit `[Document N]` references only and is disabled by default;
+- the stock trainer selects from metrics emitted by TRL/Transformers (normally `eval_loss`); custom task metrics require extending the trainer;
+- confidence intervals are unadjusted for multiple comparisons.
 
 Out of scope for v0.1:
 

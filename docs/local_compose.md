@@ -91,13 +91,20 @@ docker compose --env-file .env.compose --profile lab up -d --build --wait lab
 docker compose --env-file .env.compose exec lab bash
 ```
 
-Run the public SQuAD workflow as explicit, restartable jobs:
+Run the public SQuAD workflow as explicit, restartable jobs. Preparation emits both ordinary SFT and hard-negative RAFT data. Train the two adapters against the same base revision and training source split, then execute the four-recipe benchmark:
 
 ```bash
 docker compose --env-file .env.compose run --rm prepare
-docker compose --env-file .env.compose run --rm train
-docker compose --env-file .env.compose run --rm evaluate
+TRAIN_RECIPE=configs/recipes/hf-squad-sft-smoke.yaml \
+  TRAIN_FILE=data/hf_squad_smoke/sft_train.jsonl \
+  docker compose --env-file .env.compose run --rm train
+TRAIN_RECIPE=configs/recipes/hf-squad-raft-smoke.yaml \
+  TRAIN_FILE=data/hf_squad_smoke/raft_train.jsonl \
+  docker compose --env-file .env.compose run --rm train
+docker compose --env-file .env.compose run --rm benchmark
 ```
+
+The `train` service passes the held-out evaluation file for leakage checking. The `benchmark` service writes `outputs/hf-squad-benchmark/summary.json`, `report.md`, and per-recipe predictions. Its tracker defaults to `none`; set `BENCHMARK_TRACKING_BACKEND=wandb` to log metrics and artifacts to the local W&B service. The older `evaluate` job remains as a focused Base-vs-RAFT/oracle diagnostic.
 
 Verify W&B Models logging and a Weave trace after configuring the API key and licenses:
 
