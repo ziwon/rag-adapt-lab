@@ -19,7 +19,9 @@ class WandbTracker(Tracker):
         self.run = None
 
     def start_run(self, *, name: str | None = None, config: dict[str, Any] | None = None) -> None:
-        self.run = self.wandb.init(project=self.project, entity=self.entity, name=name, config=config or {})
+        self.run = self.wandb.init(
+            project=self.project, entity=self.entity, name=name, config=config or {}
+        )
 
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None:
         self.wandb.log(metrics, step=step)

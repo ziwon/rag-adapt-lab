@@ -7,7 +7,9 @@ from typing import Any
 
 class Tracker(ABC):
     @abstractmethod
-    def start_run(self, *, name: str | None = None, config: dict[str, Any] | None = None) -> None: ...
+    def start_run(
+        self, *, name: str | None = None, config: dict[str, Any] | None = None
+    ) -> None: ...
 
     @abstractmethod
     def log(self, metrics: dict[str, Any], step: int | None = None) -> None: ...
