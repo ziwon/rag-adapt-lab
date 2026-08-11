@@ -44,26 +44,31 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     lines = [
         "# RAG adaptation benchmark report",
         "",
-        "| Recipe | EM | Token F1 | Correctness | Groundedness | p50 Latency | p95 Latency | Tokens/s | Peak VRAM |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Recipe | EM | Token F1 | Correctness | Groundedness | p50 Inference | p95 Inference | Output tok/s | Allocated VRAM | Reserved VRAM |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     recipes = summary.get("recipes", {})
     for recipe, values in recipes.items():
         metrics = values.get("metrics", {})
-        correctness = _preferred_metric(metrics, "judge_correctness", "answer_correctness")
-        groundedness = _preferred_metric(metrics, "judge_groundedness", "groundedness")
+        correctness = _preferred_metric(metrics, "judge_correctness", "reference_overlap")
+        groundedness = _preferred_metric(
+            metrics, "judge_groundedness", "lexical_groundedness"
+        )
         lines.append(
             "| {name} | {em} | {f1} | {correctness} | {groundedness} | {p50} | "
-            "{p95} | {throughput} | {vram} |".format(
+            "{p95} | {throughput} | {allocated} | {reserved} |".format(
                 name=DISPLAY_NAMES.get(recipe, recipe),
                 em=_number(metrics.get("exact_match")),
                 f1=_number(metrics.get("token_f1")),
                 correctness=_number(correctness),
                 groundedness=_number(groundedness),
-                p50=_with_unit(metrics.get("end_to_end_latency_p50_s"), "s"),
-                p95=_with_unit(metrics.get("end_to_end_latency_p95_s"), "s"),
-                throughput=_number(metrics.get("tokens_per_second"), digits=1),
-                vram=_with_unit(metrics.get("peak_gpu_vram_gb"), " GB", digits=2),
+                p50=_with_unit(metrics.get("inference_e2e_latency_p50_s"), "s"),
+                p95=_with_unit(metrics.get("inference_e2e_latency_p95_s"), "s"),
+                throughput=_number(
+                    metrics.get("output_tokens_per_model_generate_second"), digits=1
+                ),
+                allocated=_with_unit(metrics.get("peak_allocated_vram_gb"), " GB", digits=2),
+                reserved=_with_unit(metrics.get("peak_reserved_vram_gb"), " GB", digits=2),
             )
         )
 
@@ -71,9 +76,9 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Correctness uses the configured judge when enabled and otherwise reports the "
-            "deterministic reference token-overlap score. Groundedness is lexical unless a judge "
-            "metric is configured.",
+            "Correctness uses the configured judge when available and otherwise reports the "
+            "deterministic `reference_overlap` score. Groundedness is explicitly lexical unless "
+            "a judge metric is available. Judge time is excluded from inference latency.",
             "",
             "## Decision summary",
             "",
@@ -112,6 +117,23 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         )
     )
 
+    lines.extend(["", "## Judge reliability", ""])
+    judge_rows = [
+        values.get("metrics", {})
+        for values in recipes.values()
+        if values.get("metrics", {}).get("judge_examples", 0)
+    ]
+    if not judge_rows:
+        lines.append("The optional LLM judge was disabled; canonical EM and Token F1 are unaffected.")
+    else:
+        total = sum(int(metrics.get("judge_examples", 0)) for metrics in judge_rows)
+        failures = sum(int(metrics.get("judge_failures", 0)) for metrics in judge_rows)
+        successes = total - failures
+        lines.append(
+            f"Judge coverage: {_number(successes / total if total else None)}; failure rate: "
+            f"{_number(failures / total if total else None)} ({failures}/{total})."
+        )
+
     lines.extend(["", "## Paired comparisons", ""])
     if not comparisons:
         lines.append("No requested recipe pairs were available.")
@@ -131,6 +153,7 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         lines.append("")
 
     config = summary.get("configuration", {})
+    provenance = summary.get("provenance", {})
     lines.extend(
         [
             "## Reproducibility contract",
@@ -140,10 +163,17 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
             f"- Retriever: `{config.get('retriever', {}).get('kind', 'unknown')}` with "
             f"`top_k={config.get('retriever', {}).get('top_k', 'unknown')}`.",
             f"- Prompt version: `{config.get('prompt', {}).get('version', 'unknown')}`.",
+            f"- Chat-template arguments: `{config.get('model', {}).get('chat_template_kwargs', {})}`.",
+            f"- Model condition: `{config.get('model', {}).get('condition', 'unknown')}`.",
+            f"- Adapter provenance verified: `{provenance.get('verified', True)}`; legacy override: "
+            f"`{provenance.get('allow_unverified_adapter', False)}`.",
             f"- Bootstrap samples: `{config.get('bootstrap_samples', 'unknown')}`.",
             "- LLM-judge scores are complementary; exact match and token F1 remain canonical "
             "deterministic metrics.",
             "",
         ]
     )
+    for warning in provenance.get("warnings", []):
+        lines.append(f"- **UNVERIFIED PROVENANCE:** {warning}")
+    lines.append("")
     return "\n".join(lines)

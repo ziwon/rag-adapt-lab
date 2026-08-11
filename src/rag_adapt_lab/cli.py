@@ -7,13 +7,18 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from rag_adapt_lab.config import load_yaml, validate_hf_model_config
+from rag_adapt_lab.config import (
+    effective_chat_template_kwargs,
+    load_yaml,
+    validate_hf_model_config,
+)
 from rag_adapt_lab.data.io import load_documents, load_eval, load_qa_examples, write_jsonl
-from rag_adapt_lab.data.raft import build_raft_examples
+from rag_adapt_lab.data.raft import build_raft_examples, build_raft_partitions
 from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.evaluation.scorers import build_scorer
-from rag_adapt_lab.generation.prompts import RAG_PROMPT_NAME, RAG_PROMPT_VERSION
+from rag_adapt_lab.generation.prompts import rag_prompt_provenance
+from rag_adapt_lab.provenance import BENCHMARK_SCHEMA_VERSION
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
 from rag_adapt_lab.retrieval.factory import create_retriever
@@ -49,12 +54,12 @@ def prepare_raft(
         readable=True,
         help="Labeled QA examples reserved for training.",
     ),
-    held_out_eval: Path | None = typer.Option(
-        None,
+    held_out_eval: Path = typer.Option(
+        ...,
         "--held-out-eval",
         exists=True,
         readable=True,
-        help="Optional held-out split checked for overlapping IDs and questions.",
+        help="Held-out benchmark split checked for overlapping IDs and questions.",
     ),
     output: Path = typer.Option(...),
     distractors: int = typer.Option(2, min=0, max=20),
@@ -65,27 +70,96 @@ def prepare_raft(
         help="Distractor strategy: random or bm25-hard-negative.",
     ),
     candidate_pool_size: int = typer.Option(20, min=1),
+    validation_output: Path | None = typer.Option(
+        None,
+        "--validation-output",
+        help="Split raw QA before mining and write the validation RAFT partition here.",
+    ),
+    split_config: Path | None = typer.Option(
+        None,
+        "--split-config",
+        exists=True,
+        readable=True,
+        help="Grouped split and corpus-policy YAML used with --validation-output.",
+    ),
+    validation_ratio: float = typer.Option(0.1, min=0.0, max=0.99),
+    split_strategy: str = typer.Option("grouped", "--split-strategy"),
+    group_by: str = typer.Option("normalized_question", "--group-by"),
+    corpus_policy: str = typer.Option("shared-corpus", "--corpus-policy"),
+    manifest_output: Path | None = typer.Option(None, "--manifest-output"),
 ) -> None:
     training_examples = load_qa_examples(training_set)
-    if held_out_eval is not None:
-        try:
-            ensure_disjoint_qa_splits(training_examples, load_eval(held_out_eval))
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc), param_hint="--training-set") from exc
+    try:
+        ensure_disjoint_qa_splits(training_examples, load_eval(held_out_eval))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--training-set") from exc
     if negative_strategy not in {"random", "bm25-hard-negative"}:
         raise typer.BadParameter(
             "Expected random or bm25-hard-negative", param_hint="--negative-strategy"
         )
-    rows = build_raft_examples(
-        load_documents(documents),
-        training_examples,
-        distractors=distractors,
-        seed=seed,
-        negative_strategy=negative_strategy,  # type: ignore[arg-type]
-        candidate_pool_size=candidate_pool_size,
+    loaded_documents = load_documents(documents)
+    if validation_output is None:
+        if split_config is not None or corpus_policy == "document-disjoint":
+            raise typer.BadParameter(
+                "Strict split configuration requires --validation-output so negative mining "
+                "occurs after partitioning",
+                param_hint="--validation-output",
+            )
+        rows = build_raft_examples(
+            loaded_documents,
+            training_examples,
+            distractors=distractors,
+            seed=seed,
+            negative_strategy=negative_strategy,  # type: ignore[arg-type]
+            candidate_pool_size=candidate_pool_size,
+        )
+        write_jsonl(output, rows)
+        console.print(f"[green]Wrote[/green] {len(rows)} RAFT examples to {output}")
+        return
+
+    split_values = load_yaml(split_config) if split_config is not None else {}
+    resolved_strategy = str(split_values.get("strategy", split_strategy))
+    resolved_policy = str(split_values.get("corpus_policy", corpus_policy))
+    resolved_ratio = float(split_values.get("validation_ratio", validation_ratio))
+    configured_groups = split_values.get("group_by")
+    if configured_groups is None:
+        resolved_groups = tuple(value.strip() for value in group_by.split(",") if value.strip())
+    elif isinstance(configured_groups, list) and all(
+        isinstance(value, str) for value in configured_groups
+    ):
+        resolved_groups = tuple(configured_groups)
+    else:
+        raise typer.BadParameter(
+            "split group_by must be a list of strings", param_hint="--split-config"
+        )
+    try:
+        partitions = build_raft_partitions(
+            loaded_documents,
+            training_examples,
+            validation_ratio=resolved_ratio,
+            seed=int(split_values.get("seed", seed)),
+            split_strategy=resolved_strategy,  # type: ignore[arg-type]
+            group_by=resolved_groups,
+            corpus_policy=resolved_policy,  # type: ignore[arg-type]
+            distractors=distractors,
+            negative_strategy=negative_strategy,  # type: ignore[arg-type]
+            candidate_pool_size=candidate_pool_size,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--split-config") from exc
+    write_jsonl(output, partitions.train_rows)
+    write_jsonl(validation_output, partitions.validation_rows)
+    resolved_manifest = manifest_output or output.with_suffix(output.suffix + ".manifest.json")
+    resolved_manifest.parent.mkdir(parents=True, exist_ok=True)
+    resolved_manifest.write_text(
+        json.dumps(partitions.manifest, indent=2) + "\n",
+        encoding="utf-8",
     )
-    write_jsonl(output, rows)
-    console.print(f"[green]Wrote[/green] {len(rows)} RAFT examples to {output}")
+    console.print(
+        f"[green]Wrote[/green] {len(partitions.train_rows)} train and "
+        f"{len(partitions.validation_rows)} validation RAFT examples; manifest: "
+        f"{resolved_manifest}"
+    )
 
 
 @app.command("eval-retrieval")
@@ -120,8 +194,8 @@ def train(
     validation_file: Path | None = typer.Option(
         None, "--validation-file", exists=True, readable=True
     ),
-    held_out_eval: Path | None = typer.Option(
-        None,
+    held_out_eval: Path = typer.Option(
+        ...,
         "--held-out-eval",
         exists=True,
         readable=True,
@@ -160,6 +234,11 @@ def benchmark(
     load_in_4bit: bool = typer.Option(False, "--load-in-4bit"),
     tracking_backend: str = typer.Option("none", "--tracking-backend"),
     dry_run: bool = typer.Option(False, "--dry-run"),
+    allow_unverified_adapter: bool = typer.Option(
+        False,
+        "--allow-unverified-adapter",
+        help="Permit legacy adapters but mark the benchmark as unverified.",
+    ),
 ) -> None:
     requested = [item.strip() for item in recipes.split(",") if item.strip()]
     allowed = {"base", "rag", "sft-rag", "raft-rag"}
@@ -214,7 +293,7 @@ def benchmark(
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--recipes") from exc
     payload = {
-        "version": 2,
+        "schema_version": BENCHMARK_SCHEMA_VERSION,
         "fixed_contract": {
             "model_config": str(model_config),
             "documents": str(documents),
@@ -224,10 +303,12 @@ def benchmark(
             "top_k": resolved_top_k,
             "seed": seed,
             "generation": model_values.get("generation", {}),
-            "prompt": {"name": RAG_PROMPT_NAME, "version": RAG_PROMPT_VERSION},
+            "chat_template_kwargs": effective_chat_template_kwargs(model_values),
+            "prompt": rag_prompt_provenance(),
             "bootstrap_samples": bootstrap_samples,
             "warmup_examples": warmup_examples,
             "load_in_4bit": load_in_4bit,
+            "allow_unverified_adapter": allow_unverified_adapter,
         },
         "jobs": [job.as_dict() for job in jobs],
     }
@@ -274,6 +355,7 @@ def benchmark(
             model_config=model_values,
             load_in_4bit=load_in_4bit,
             seed=seed,
+            allow_unverified_adapter=allow_unverified_adapter,
         ),
         scorer=build_scorer(scorer_values),
         output_dir=output_dir,
@@ -291,6 +373,7 @@ def benchmark(
         model_config_path=model_config,
         documents_path=documents,
         eval_path=eval_set,
+        allow_unverified_adapter=allow_unverified_adapter,
     )
     runner.run()
     console.print(f"[green]Benchmark complete:[/green] {output_dir / 'summary.json'}")

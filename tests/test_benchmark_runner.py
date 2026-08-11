@@ -1,10 +1,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from rag_adapt_lab.benchmark.runner import BenchmarkRunner
 from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.evaluation.scorers import build_scorer
 from rag_adapt_lab.generation.base import GenerationResult, Generator
+from rag_adapt_lab.generation.prompts import rag_prompt_provenance
+from rag_adapt_lab.provenance import artifact_sha256, file_sha256
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 
@@ -107,6 +111,7 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
         top_k=2,
         bootstrap_samples=100,
         seed=3,
+        allow_unverified_adapter=True,
     )
     summary = runner.run()
 
@@ -114,12 +119,15 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
     assert factory.created == [None, "sft-adapter", "raft-adapter"]
     assert set(summary["recipes"]) == {"base", "rag", "sft-rag", "raft-rag"}
     assert summary["configuration"]["prompt"]["version"] == "3"
+    assert summary["schema_version"] == 2
+    assert summary["provenance"]["verified"] is False
     assert summary["retrieval_metrics"]["retrieval/evaluated"] == len(examples)
     assert "base->rag" in summary["comparisons"]
     assert "rag->raft-rag" in summary["comparisons"]
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
     assert "RAFT + RAG" in (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "UNVERIFIED PROVENANCE" in (tmp_path / "report.md").read_text(encoding="utf-8")
 
     rows = [
         json.loads(line)
@@ -130,3 +138,91 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
     base_rows = [row for row in rows if row["recipe"] == "base"]
     assert all(row["retrieval_used"] is False for row in base_rows)
     assert all(row["tokens_per_second"] == 100.0 for row in rows)
+    assert all(row["model_generate_latency_s"] == 0.01 for row in rows)
+    assert all(row["judge_latency_s"] is None for row in rows)
+
+
+def test_benchmark_rejects_identical_sft_and_raft_adapter_paths(tmp_path: Path) -> None:
+    adapter = tmp_path / "same-adapter"
+    adapter.mkdir()
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text('{"id":"q","question":"q"}\n', encoding="utf-8")
+    jobs = build_plan(
+        recipes=["sft-rag", "raft-rag"],
+        model_config="model.yaml",
+        documents="documents.jsonl",
+        eval_set="eval.jsonl",
+        adapters={"sft-rag": adapter, "raft-rag": adapter},
+    )
+    with pytest.raises(ValueError, match="same adapter artifact"):
+        BenchmarkRunner(
+            jobs=jobs,
+            model_config={
+                "model_id": "test/model",
+                "revision": "0" * 40,
+                "generation": {"max_new_tokens": 8, "do_sample": False},
+            },
+            documents=[Document(id="doc", text="doc")],
+            examples=[EvalExample(id="q", question="q", relevant_doc_ids=["doc"])],
+            retriever=StaticRetriever(),
+            retriever_config={"kind": "static"},
+            generator_factory=FakeGeneratorFactory(),
+            scorer=build_scorer(),
+            output_dir=tmp_path / "output",
+            top_k=1,
+            eval_path=eval_path,
+        )
+
+
+def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path: Path) -> None:
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text('{"id":"q","question":"q"}\n', encoding="utf-8")
+    adapters: dict[str, Path] = {}
+    for mode in ("sft", "raft"):
+        adapter = tmp_path / mode
+        adapter.mkdir()
+        (adapter / "adapter_config.json").write_text(
+            json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        )
+        (adapter / "adapter_model.safetensors").write_bytes(b"identical-weights")
+        manifest = {
+            "schema_version": 2,
+            "model": {"model_id": "test/model", "revision": "0" * 40},
+            "adaptation_mode": mode,
+            "training_prompt": rag_prompt_provenance(),
+            "chat_template_kwargs": {},
+            "training_dataset_fingerprint": "1" * 64,
+            "validation_dataset_fingerprint": "2" * 64,
+            "held_out_evaluation_sha256": file_sha256(eval_path),
+            "training_configuration_sha256": "3" * 64,
+            "adapter_artifact_sha256": artifact_sha256(adapter),
+        }
+        (adapter / "raglab_adapter_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        adapters[mode] = adapter
+    jobs = build_plan(
+        recipes=["sft-rag", "raft-rag"],
+        model_config="model.yaml",
+        documents="documents.jsonl",
+        eval_set="eval.jsonl",
+        adapters={"sft-rag": adapters["sft"], "raft-rag": adapters["raft"]},
+    )
+    with pytest.raises(ValueError, match="same adapter artifact"):
+        BenchmarkRunner(
+            jobs=jobs,
+            model_config={
+                "model_id": "test/model",
+                "revision": "0" * 40,
+                "generation": {"max_new_tokens": 8, "do_sample": False},
+            },
+            documents=[Document(id="doc", text="doc")],
+            examples=[EvalExample(id="q", question="q", relevant_doc_ids=["doc"])],
+            retriever=StaticRetriever(),
+            retriever_config={"kind": "static"},
+            generator_factory=FakeGeneratorFactory(),
+            scorer=build_scorer(),
+            output_dir=tmp_path / "output",
+            top_k=1,
+            eval_path=eval_path,
+        )

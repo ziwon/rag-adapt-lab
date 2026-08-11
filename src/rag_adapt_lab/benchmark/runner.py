@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,13 +19,18 @@ from rag_adapt_lab.evaluation.statistics import (
     aggregate_prediction_rows,
     paired_bootstrap_delta,
 )
-from rag_adapt_lab.generation.base import Generator
+from rag_adapt_lab.generation.base import GenerationResult, Generator
 from rag_adapt_lab.generation.prompts import (
-    RAG_PROMPT_NAME,
-    RAG_PROMPT_VERSION,
-    format_rag_user_prompt,
+    rag_prompt_provenance,
 )
 from rag_adapt_lab.generation.transformers import TransformersGenerator
+from rag_adapt_lab.provenance import (
+    BENCHMARK_SCHEMA_VERSION,
+    AdapterVerification,
+    artifact_sha256,
+    file_sha256,
+    validate_adapter_provenance,
+)
 from rag_adapt_lab.recipes.plan import RECIPE_RETRIEVAL, BenchmarkJob
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 from rag_adapt_lab.tracking.base import Tracker
@@ -49,6 +55,7 @@ class TransformersGeneratorFactory:
     model_config: Mapping[str, Any]
     load_in_4bit: bool = False
     seed: int = 42
+    allow_unverified_adapter: bool = False
 
     def create(self, adapter_path: str | Path | None) -> Generator:
         return TransformersGenerator(
@@ -56,6 +63,7 @@ class TransformersGeneratorFactory:
             adapter_path=adapter_path,
             load_in_4bit=self.load_in_4bit,
             seed=self.seed,
+            allow_unverified_adapter=self.allow_unverified_adapter,
         )
 
 
@@ -65,14 +73,6 @@ class CachedRetrieval:
     latency_s: float
 
 
-def _file_sha256(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _path_sha256(path: str | Path | None) -> str | None:
     if path is None:
         return None
@@ -80,15 +80,8 @@ def _path_sha256(path: str | Path | None) -> str | None:
     if not source.exists():
         return None
     if source.is_file():
-        return _file_sha256(source)
-    digest = hashlib.sha256()
-    for child in sorted(item for item in source.rglob("*") if item.is_file()):
-        digest.update(str(child.relative_to(source)).encode())
-        digest.update(b"\0")
-        with child.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
+        return file_sha256(source)
+    return artifact_sha256(source)
 
 
 def _reference_answers(example: EvalExample) -> list[str]:
@@ -103,6 +96,31 @@ def _reference_answers(example: EvalExample) -> list[str]:
 def _comparison_seed(seed: int, pair: str, metric: str) -> int:
     digest = hashlib.sha256(f"{seed}:{pair}:{metric}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def compose_inference_e2e_latency(
+    generated: GenerationResult,
+    *,
+    retrieval_latency_s: float,
+) -> float | None:
+    """Compose retrieval-through-decode latency without scoring or judge time."""
+    post_retrieval_latency = generated.inference_e2e_latency_s
+    if post_retrieval_latency is None:
+        stages = [
+            generated.prompt_build_latency_s,
+            generated.chat_template_latency_s,
+            generated.tokenization_latency_s,
+            generated.device_transfer_latency_s,
+            generated.model_generate_latency_s,
+            generated.decode_latency_s,
+        ]
+        available = [value for value in stages if value is not None]
+        post_retrieval_latency = sum(available) if available else None
+    return (
+        post_retrieval_latency + retrieval_latency_s
+        if post_retrieval_latency is not None
+        else None
+    )
 
 
 class BenchmarkRunner:
@@ -129,6 +147,7 @@ class BenchmarkRunner:
         model_config_path: str | Path | None = None,
         documents_path: str | Path | None = None,
         eval_path: str | Path | None = None,
+        allow_unverified_adapter: bool = False,
     ) -> None:
         if top_k < 1:
             raise ValueError("top_k must be positive")
@@ -157,6 +176,8 @@ class BenchmarkRunner:
         self.jobs = list(jobs)
         self.model_config = dict(model_config)
         self.model_id, self.model_revision = validate_hf_model_config(self.model_config)
+        self.chat_template_kwargs = dict(self.model_config.get("chat_template_kwargs", {}))
+        self.prompt_provenance = rag_prompt_provenance()
         self.documents = list(documents)
         self.examples = list(examples)
         self.retriever = retriever
@@ -173,6 +194,10 @@ class BenchmarkRunner:
         self.model_config_path = Path(model_config_path) if model_config_path else None
         self.documents_path = Path(documents_path) if documents_path else None
         self.eval_path = Path(eval_path) if eval_path else None
+        self.eval_sha256 = file_sha256(self.eval_path) if self.eval_path is not None else None
+        self.allow_unverified_adapter = allow_unverified_adapter
+        self.adapter_verifications: dict[str, AdapterVerification] = {}
+        self.provenance_warnings: list[str] = []
 
         if not self.documents:
             raise ValueError("Benchmark corpus must contain at least one document")
@@ -194,6 +219,78 @@ class BenchmarkRunner:
         )
         if missing:
             raise ValueError(f"Evaluation set references missing documents: {missing[:10]}")
+        if (
+            any(job.recipe in {"sft-rag", "raft-rag"} for job in self.jobs)
+            and self.eval_sha256 is None
+            and not self.allow_unverified_adapter
+        ):
+            raise ValueError(
+                "eval_path is required to verify adapted benchmark conditions against the "
+                "current held-out evaluation file"
+            )
+        self._validate_adapters()
+
+    def _validate_adapters(self) -> None:
+        expected_prompt = {
+            **self.prompt_provenance,
+            "chat_template_kwargs": self.chat_template_kwargs,
+        }
+        configured_adapters = {
+            job.recipe: Path(job.adapter_path)
+            for job in self.jobs
+            if job.recipe in {"sft-rag", "raft-rag"} and job.adapter_path is not None
+        }
+        configured_sft = configured_adapters.get("sft-rag")
+        configured_raft = configured_adapters.get("raft-rag")
+        if (
+            configured_sft is not None
+            and configured_raft is not None
+            and configured_sft.resolve() == configured_raft.resolve()
+        ):
+            message = "SFT and RAFT conditions use the same adapter artifact"
+            if not self.allow_unverified_adapter:
+                raise ValueError(message)
+            self.provenance_warnings.append(message)
+        for job in self.jobs:
+            if job.recipe not in {"sft-rag", "raft-rag"}:
+                continue
+            assert job.adapter_path is not None
+            verification = validate_adapter_provenance(
+                job.adapter_path,
+                model_id=self.model_id,
+                model_revision=self.model_revision,
+                expected_mode="sft" if job.recipe == "sft-rag" else "raft",
+                expected_prompt=expected_prompt,
+                held_out_evaluation_sha256=self.eval_sha256,
+                allow_unverified=self.allow_unverified_adapter,
+            )
+            self.adapter_verifications[job.recipe] = verification
+            self.provenance_warnings.extend(
+                f"{job.recipe}: {message}" for message in verification.warnings
+            )
+
+        sft = self.adapter_verifications.get("sft-rag")
+        raft = self.adapter_verifications.get("raft-rag")
+        same_hash = bool(
+            sft is not None
+            and raft is not None
+            and sft.artifact_sha256
+            and sft.artifact_sha256 == raft.artifact_sha256
+        )
+        if same_hash:
+            message = "SFT and RAFT conditions use the same adapter artifact"
+            if not self.allow_unverified_adapter:
+                raise ValueError(message)
+            if message not in self.provenance_warnings:
+                self.provenance_warnings.append(message)
+
+        if self.provenance_warnings:
+            for message in self.provenance_warnings:
+                warnings.warn(
+                    f"UNVERIFIED ADAPTER PROVENANCE: {message}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def _retrieve_once(self) -> tuple[dict[str, CachedRetrieval], RetrievalMetrics]:
         self.retriever.index(self.documents)
@@ -219,23 +316,22 @@ class BenchmarkRunner:
         return cache, metrics
 
     def _configuration(self) -> dict[str, Any]:
-        prompt_signature = format_rag_user_prompt(
-            question="__QUESTION__",
-            contexts=["__DOCUMENT_1__", "__DOCUMENT_2__"],
-        )
         configuration: dict[str, Any] = {
             "model": {
                 "model_id": self.model_id,
                 "revision": self.model_revision,
                 "generation": dict(self.model_config.get("generation", {})),
+                "chat_template_kwargs": self.chat_template_kwargs,
+                "thinking_enabled": self.chat_template_kwargs.get("enable_thinking") is True,
+                "condition": (
+                    "thinking-enabled"
+                    if self.chat_template_kwargs.get("enable_thinking") is True
+                    else "concise-non-thinking"
+                ),
                 "trust_remote_code": False,
             },
             "retriever": {**self.retriever_config, "top_k": self.top_k},
-            "prompt": {
-                "name": RAG_PROMPT_NAME,
-                "version": RAG_PROMPT_VERSION,
-                "template_sha256": hashlib.sha256(prompt_signature.encode()).hexdigest(),
-            },
+            "prompt": self.prompt_provenance,
             "generator": self.generator_config,
             "scorer": self.scorer.metadata(),
             "seed": self.seed,
@@ -249,7 +345,7 @@ class BenchmarkRunner:
             "eval_set": self.eval_path,
         }
         configuration["inputs"] = {
-            name: {"path": str(path), "sha256": _file_sha256(path)}
+            name: {"path": str(path), "sha256": file_sha256(path)}
             for name, path in files.items()
             if path is not None
         }
@@ -261,7 +357,7 @@ class BenchmarkRunner:
         generator: Generator,
         retrieval_cache: Mapping[str, CachedRetrieval],
         retrieval_metrics: RetrievalMetrics,
-    ) -> tuple[list[dict[str, Any]], dict[str, float | int | None]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         for example in self.examples[: self.warmup_examples]:
             warmup_results = retrieval_cache[example.id].results
             contexts = (
@@ -278,6 +374,7 @@ class BenchmarkRunner:
             references = _reference_answers(example)
             em = max((exact_match(generated.text, value) for value in references), default=None)
             f1 = max((token_f1(generated.text, value) for value in references), default=None)
+            scoring_started = time.perf_counter()
             scores = self.scorer.score(
                 question=example.question,
                 answer=generated.text,
@@ -289,16 +386,34 @@ class BenchmarkRunner:
                 else [],
                 relevant_doc_ids=example.relevant_doc_ids,
             )
-            latency = generated.latency_s
-            tokens_per_second = (
-                generated.output_tokens / latency
-                if generated.output_tokens is not None and latency is not None and latency > 0
+            total_scoring_latency = time.perf_counter() - scoring_started
+            judge_latency_value = scores.get("judge_latency_s")
+            judge_latency = (
+                float(judge_latency_value)
+                if isinstance(judge_latency_value, (int, float))
+                and not isinstance(judge_latency_value, bool)
+                else 0.0
+            )
+            scoring_latency = max(0.0, total_scoring_latency - judge_latency)
+            model_generate_latency = generated.model_generate_latency_s
+            output_tokens_per_second = (
+                generated.output_tokens / model_generate_latency
+                if generated.output_tokens is not None
+                and model_generate_latency is not None
+                and model_generate_latency > 0
                 else None
             )
-            end_to_end = (
-                latency + (cached.latency_s if job.use_retrieval else 0.0)
-                if latency is not None
+            total_tokens_per_second = (
+                (generated.prompt_tokens + generated.output_tokens) / model_generate_latency
+                if generated.prompt_tokens is not None
+                and generated.output_tokens is not None
+                and model_generate_latency is not None
+                and model_generate_latency > 0
                 else None
+            )
+            inference_e2e_latency = compose_inference_e2e_latency(
+                generated,
+                retrieval_latency_s=cached.latency_s if job.use_retrieval else 0.0,
             )
             rows.append(
                 {
@@ -308,6 +423,8 @@ class BenchmarkRunner:
                     "reference": example.reference_answer,
                     "references": references,
                     "prediction": generated.text,
+                    "raw_prediction": generated.raw_text,
+                    "reasoning": generated.reasoning,
                     "exact_match": em,
                     "token_f1": f1,
                     "scores": scores,
@@ -324,13 +441,31 @@ class BenchmarkRunner:
                     "retrieval_latency_s": cached.latency_s,
                     "prompt_tokens": generated.prompt_tokens,
                     "output_tokens": generated.output_tokens,
-                    "latency_s": latency,
-                    "end_to_end_latency_s": end_to_end,
-                    "tokens_per_second": tokens_per_second,
+                    "reasoning_tokens": generated.reasoning_tokens,
+                    "answer_tokens": generated.answer_tokens,
+                    "prompt_build_latency_s": generated.prompt_build_latency_s,
+                    "chat_template_latency_s": generated.chat_template_latency_s,
+                    "tokenization_latency_s": generated.tokenization_latency_s,
+                    "device_transfer_latency_s": generated.device_transfer_latency_s,
+                    "model_generate_latency_s": model_generate_latency,
+                    "decode_latency_s": generated.decode_latency_s,
+                    "inference_e2e_latency_s": inference_e2e_latency,
+                    "scoring_latency_s": scoring_latency,
+                    "judge_latency_s": judge_latency if "judge_status" in scores else None,
+                    "output_tokens_per_model_generate_second": output_tokens_per_second,
+                    "total_tokens_per_model_generate_second": total_tokens_per_second,
+                    "batch_size": generated.batch_size,
+                    "generation_mode": generated.generation_mode,
+                    # Schema-v1 aliases; remove in the next major schema revision.
+                    "latency_s": model_generate_latency,
+                    "end_to_end_latency_s": inference_e2e_latency,
+                    "tokens_per_second": output_tokens_per_second,
                 }
             )
         metrics = aggregate_prediction_rows(rows)
-        metrics["peak_gpu_vram_gb"] = generator.peak_memory_gb()
+        metrics["peak_allocated_vram_gb"] = generator.peak_allocated_vram_gb()
+        metrics["peak_reserved_vram_gb"] = generator.peak_reserved_vram_gb()
+        metrics["peak_gpu_vram_gb"] = metrics["peak_allocated_vram_gb"]
         if job.use_retrieval:
             metrics.update(retrieval_metrics.as_dict())
         return rows, metrics
@@ -359,9 +494,9 @@ class BenchmarkRunner:
                 if all(has_numeric_metric(name, metric) for name in (baseline, candidate))
             ]
             for optional in (
-                "answer_correctness",
-                "groundedness",
-                "unsupported_claim_rate",
+                "reference_overlap",
+                "lexical_groundedness",
+                "lexical_unsupported_claim_rate",
                 "judge_correctness",
                 "judge_groundedness",
                 "judge_unsupported_claim_rate",
@@ -414,7 +549,16 @@ class BenchmarkRunner:
                 write_jsonl(recipe_path, rows)
                 recipes[job.recipe] = {
                     "adapter_path": job.adapter_path,
-                    "adapter_sha256": _path_sha256(job.adapter_path),
+                    "adapter_sha256": (
+                        self.adapter_verifications[job.recipe].artifact_sha256
+                        if job.recipe in self.adapter_verifications
+                        else _path_sha256(job.adapter_path)
+                    ),
+                    "adapter_provenance": (
+                        self.adapter_verifications[job.recipe].as_dict()
+                        if job.recipe in self.adapter_verifications
+                        else None
+                    ),
                     "retrieval_enabled": job.use_retrieval,
                     "predictions": str(recipe_path),
                     "metrics": metrics,
@@ -430,8 +574,14 @@ class BenchmarkRunner:
             write_jsonl(self.output_dir / "predictions.jsonl", all_rows)
             comparisons = self._comparisons(rows_by_recipe)
             summary = {
-                "schema_version": 1,
+                "schema_version": BENCHMARK_SCHEMA_VERSION,
                 "configuration": configuration,
+                "provenance": {
+                    "verified": not self.provenance_warnings
+                    and all(item.verified for item in self.adapter_verifications.values()),
+                    "allow_unverified_adapter": self.allow_unverified_adapter,
+                    "warnings": self.provenance_warnings,
+                },
                 "retrieval_metrics": retrieval_metrics.as_dict(),
                 "recipes": recipes,
                 "comparisons": comparisons,

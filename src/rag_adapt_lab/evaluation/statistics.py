@@ -32,50 +32,68 @@ def mean_numeric(rows: Sequence[Mapping[str, Any]], metric: str) -> float | None
     return statistics.fmean(values) if values else None
 
 
-def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, float | int | None]:
-    latencies = [
-        float(row["latency_s"]) for row in rows if isinstance(row.get("latency_s"), (int, float))
-    ]
-    end_to_end = [
-        float(row["end_to_end_latency_s"])
-        for row in rows
-        if isinstance(row.get("end_to_end_latency_s"), (int, float))
-    ]
-    retrieval_latencies = [
-        float(row["retrieval_latency_s"])
-        for row in rows
-        if row.get("retrieval_used") is True
-        and isinstance(row.get("retrieval_latency_s"), (int, float))
-    ]
+def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    def numeric_values(field: str, *, retrieval_only: bool = False) -> list[float]:
+        return [
+            float(row[field])
+            for row in rows
+            if (not retrieval_only or row.get("retrieval_used") is True)
+            and isinstance(row.get(field), (int, float))
+            and not isinstance(row.get(field), bool)
+        ]
+
+    stage_fields = (
+        "retrieval_latency_s",
+        "prompt_build_latency_s",
+        "chat_template_latency_s",
+        "tokenization_latency_s",
+        "device_transfer_latency_s",
+        "model_generate_latency_s",
+        "decode_latency_s",
+        "inference_e2e_latency_s",
+        "scoring_latency_s",
+        "judge_latency_s",
+    )
     token_timings = [
-        (float(row["output_tokens"]), float(row["latency_s"]))
+        (float(row["output_tokens"]), float(row["model_generate_latency_s"]))
         for row in rows
         if isinstance(row.get("output_tokens"), (int, float))
-        and isinstance(row.get("latency_s"), (int, float))
-        and float(row["latency_s"]) > 0
+        and isinstance(row.get("model_generate_latency_s"), (int, float))
+        and float(row["model_generate_latency_s"]) > 0
     ]
-    summary: dict[str, float | int | None] = {
+    total_token_timings = [
+        (
+            float(row["prompt_tokens"]) + float(row["output_tokens"]),
+            float(row["model_generate_latency_s"]),
+        )
+        for row in rows
+        if isinstance(row.get("prompt_tokens"), (int, float))
+        and isinstance(row.get("output_tokens"), (int, float))
+        and isinstance(row.get("model_generate_latency_s"), (int, float))
+        and float(row["model_generate_latency_s"]) > 0
+    ]
+    summary: dict[str, Any] = {
         "examples": len(rows),
         "exact_match": mean_numeric(rows, "exact_match"),
         "token_f1": mean_numeric(rows, "token_f1"),
-        "latency_mean_s": statistics.fmean(latencies) if latencies else None,
-        "latency_p50_s": percentile(latencies, 0.50) if latencies else None,
-        "latency_p95_s": percentile(latencies, 0.95) if latencies else None,
-        "retrieval_latency_mean_s": (
-            statistics.fmean(retrieval_latencies) if retrieval_latencies else None
-        ),
-        "retrieval_latency_p50_s": (
-            percentile(retrieval_latencies, 0.50) if retrieval_latencies else None
-        ),
-        "retrieval_latency_p95_s": (
-            percentile(retrieval_latencies, 0.95) if retrieval_latencies else None
-        ),
-        "end_to_end_latency_p50_s": percentile(end_to_end, 0.50) if end_to_end else None,
-        "end_to_end_latency_p95_s": percentile(end_to_end, 0.95) if end_to_end else None,
-        "tokens_per_second": (
+        "output_tokens_per_model_generate_second": (
             sum(tokens for tokens, _ in token_timings) / sum(timing for _, timing in token_timings)
             if token_timings
             else None
+        ),
+        "total_tokens_per_model_generate_second": (
+            sum(tokens for tokens, _ in total_token_timings)
+            / sum(timing for _, timing in total_token_timings)
+            if total_token_timings
+            else None
+        ),
+        "batch_size": (
+            int(rows[0]["batch_size"])
+            if rows and isinstance(rows[0].get("batch_size"), (int, float))
+            else None
+        ),
+        "generation_mode": (
+            str(rows[0]["generation_mode"]) if rows and rows[0].get("generation_mode") else None
         ),
         "prompt_tokens_total": sum(
             int(row["prompt_tokens"])
@@ -83,7 +101,60 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, fl
             if isinstance(row.get("prompt_tokens"), (int, float))
         ),
         "output_tokens_total": sum(int(tokens) for tokens, _ in token_timings),
+        "reasoning_tokens_total": sum(
+            int(row["reasoning_tokens"])
+            for row in rows
+            if isinstance(row.get("reasoning_tokens"), (int, float))
+        ),
+        "answer_tokens_total": sum(
+            int(row["answer_tokens"])
+            for row in rows
+            if isinstance(row.get("answer_tokens"), (int, float))
+        ),
     }
+    for field in stage_fields:
+        values = numeric_values(field, retrieval_only=field == "retrieval_latency_s")
+        prefix = field.removesuffix("_s")
+        summary[f"{prefix}_mean_s"] = statistics.fmean(values) if values else None
+        summary[f"{prefix}_p50_s"] = percentile(values, 0.50) if values else None
+        summary[f"{prefix}_p95_s"] = percentile(values, 0.95) if values else None
+
+    judge_rows = [row for row in rows if "judge_status" in row.get("scores", {})]
+    if judge_rows:
+        judge_successes = sum(row["scores"].get("judge_status") == "ok" for row in judge_rows)
+        judge_failures = len(judge_rows) - judge_successes
+        cache_hits = sum(row["scores"].get("judge_cache_hit") is True for row in judge_rows)
+        summary.update(
+            {
+                "judge_examples": len(judge_rows),
+                "judge_successes": judge_successes,
+                "judge_failures": judge_failures,
+                "judge_coverage": judge_successes / len(judge_rows),
+                "judge_failure_rate": judge_failures / len(judge_rows),
+                "judge_cache_hits": cache_hits,
+                "judge_cache_misses": len(judge_rows) - cache_hits,
+            }
+        )
+    else:
+        summary.update(
+            {
+                "judge_examples": 0,
+                "judge_successes": 0,
+                "judge_failures": 0,
+                "judge_coverage": None,
+                "judge_failure_rate": None,
+                "judge_cache_hits": 0,
+                "judge_cache_misses": 0,
+            }
+        )
+
+    # Schema-v1 aliases. They are intentionally documented as deprecated.
+    summary["latency_mean_s"] = summary["model_generate_latency_mean_s"]
+    summary["latency_p50_s"] = summary["model_generate_latency_p50_s"]
+    summary["latency_p95_s"] = summary["model_generate_latency_p95_s"]
+    summary["end_to_end_latency_p50_s"] = summary["inference_e2e_latency_p50_s"]
+    summary["end_to_end_latency_p95_s"] = summary["inference_e2e_latency_p95_s"]
+    summary["tokens_per_second"] = summary["output_tokens_per_model_generate_second"]
     excluded = {
         "exact_match",
         "token_f1",
@@ -93,6 +164,9 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, fl
         "prompt_tokens",
         "output_tokens",
         "retrieval_latency_s",
+        "judge_latency_s",
+        "judge_attempts",
+        "judge_cache_hit",
     }
     metric_names = sorted(
         {
