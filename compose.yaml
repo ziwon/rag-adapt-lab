@@ -171,6 +171,8 @@ services:
       - ${TRAIN_RECIPE:-configs/recipes/hf-squad-raft-smoke.yaml}
       - --train-file
       - ${TRAIN_FILE:-data/hf_squad_smoke/raft_train.jsonl}
+      - --validation-file
+      - ${VALIDATION_FILE:-data/hf_squad_smoke/raft_validation.jsonl}
       - --held-out-eval
       - ${EVAL_FILE:-data/hf_squad_smoke/eval.jsonl}
 

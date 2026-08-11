@@ -1,0 +1,7 @@
+strategy: grouped
+validation_ratio: 0.1
+group_by:
+  - normalized_question
+  - metadata.source_document_id
+corpus_policy: document-disjoint
+seed: 42

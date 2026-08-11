@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from rag_adapt_lab.retrieval.base import Retriever
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
 
 from .schema import Document, EvalExample, RAFTContext, RAFTExample
+from .splitting import CorpusPolicy, SplitStrategy, partition_audit, split_rows
 
 NegativeStrategy = Literal["random", "bm25-hard-negative"]
 
@@ -18,6 +19,13 @@ class MinedNegative:
     document: Document
     rank: int | None = None
     score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RAFTPartitions:
+    train_rows: list[RAFTExample]
+    validation_rows: list[RAFTExample]
+    manifest: dict[str, Any]
 
 
 def _example_rng(seed: int, example_id: str) -> random.Random:
@@ -85,6 +93,7 @@ def build_raft_examples(
     negative_strategy: NegativeStrategy = "random",
     negative_retriever: Retriever | None = None,
     candidate_pool_size: int = 20,
+    mining_scope: str = "global",
 ) -> list[RAFTExample]:
     if distractors < 0:
         raise ValueError("distractors must be non-negative")
@@ -139,6 +148,11 @@ def build_raft_examples(
                 candidate_pool_size=candidate_pool_size,
                 allowed_ids=set(documents_by_id),
             )
+        if mining_scope != "global" and len(sampled) < distractors:
+            raise ValueError(
+                f"RAFT example {example.id!r} requested {distractors} distractors but the "
+                f"{mining_scope} document pool provides only {len(sampled)}"
+            )
         contexts.extend(
             RAFTContext(
                 doc_id=negative.document.id,
@@ -161,6 +175,7 @@ def build_raft_examples(
                 }
                 for negative in sampled
             ],
+            "scope": mining_scope,
         }
         rows.append(
             RAFTExample(
@@ -173,3 +188,129 @@ def build_raft_examples(
             )
         )
     return rows
+
+
+def _partition_document_pools(
+    documents: list[Document],
+    train_examples: list[EvalExample],
+    validation_examples: list[EvalExample],
+    *,
+    corpus_policy: CorpusPolicy,
+    validation_ratio: float,
+    seed: int,
+) -> tuple[list[Document], list[Document]]:
+    if corpus_policy == "shared-corpus":
+        return list(documents), list(documents)
+
+    train_positive = {
+        doc_id for example in train_examples for doc_id in example.relevant_doc_ids
+    }
+    validation_positive = {
+        doc_id for example in validation_examples for doc_id in example.relevant_doc_ids
+    }
+    overlap = train_positive & validation_positive
+    if overlap:
+        raise ValueError(
+            "document-disjoint split is impossible because positive documents cross partitions: "
+            f"{sorted(overlap)[:10]}"
+        )
+    known = {document.id for document in documents}
+    missing = sorted((train_positive | validation_positive) - known)
+    if missing:
+        raise ValueError(f"Split examples reference missing documents: {missing[:10]}")
+
+    neutral = [
+        document
+        for document in documents
+        if document.id not in train_positive and document.id not in validation_positive
+    ]
+    neutral.sort(
+        key=lambda document: hashlib.sha256(f"{seed}:{document.id}".encode()).hexdigest()
+    )
+    validation_neutral_count = round(len(neutral) * validation_ratio)
+    validation_neutral = {document.id for document in neutral[:validation_neutral_count]}
+    train_ids = train_positive | {document.id for document in neutral if document.id not in validation_neutral}
+    validation_ids = validation_positive | validation_neutral
+    train_pool = [document for document in documents if document.id in train_ids]
+    validation_pool = [document for document in documents if document.id in validation_ids]
+    if not train_pool or not validation_pool:
+        raise ValueError(
+            "document-disjoint corpus allocation produced an empty document partition"
+        )
+    return train_pool, validation_pool
+
+
+def build_raft_partitions(
+    documents: list[Document],
+    examples: list[EvalExample],
+    *,
+    validation_ratio: float = 0.1,
+    seed: int = 42,
+    split_strategy: SplitStrategy = "grouped",
+    group_by: tuple[str, ...] = ("normalized_question",),
+    corpus_policy: CorpusPolicy = "shared-corpus",
+    distractors: int = 2,
+    negative_strategy: NegativeStrategy = "random",
+    candidate_pool_size: int = 20,
+) -> RAFTPartitions:
+    """Split labeled QA first, then mine negatives within each allowed partition."""
+    raw_rows = [example.model_dump(mode="json") for example in examples]
+    split = split_rows(
+        raw_rows,
+        validation_ratio=validation_ratio,
+        seed=seed,
+        strategy=split_strategy,
+        group_by=group_by,
+        corpus_policy=corpus_policy,
+    )
+    train_examples = [EvalExample.model_validate(row) for row in split.train_rows]
+    validation_examples = [EvalExample.model_validate(row) for row in split.validation_rows]
+    train_pool, validation_pool = _partition_document_pools(
+        documents,
+        train_examples,
+        validation_examples,
+        corpus_policy=corpus_policy,
+        validation_ratio=validation_ratio,
+        seed=seed,
+    )
+    train_rows = build_raft_examples(
+        train_pool,
+        train_examples,
+        distractors=distractors,
+        seed=seed,
+        negative_strategy=negative_strategy,
+        candidate_pool_size=candidate_pool_size,
+        mining_scope="train-partition-only",
+    )
+    validation_rows = build_raft_examples(
+        validation_pool,
+        validation_examples,
+        distractors=distractors,
+        seed=seed,
+        negative_strategy=negative_strategy,
+        candidate_pool_size=candidate_pool_size,
+        mining_scope="validation-partition-only",
+    )
+    rendered_train = [row.model_dump(mode="json") for row in train_rows]
+    rendered_validation = [row.model_dump(mode="json") for row in validation_rows]
+    audit = partition_audit(rendered_train, rendered_validation)
+    if corpus_policy == "document-disjoint" and audit.document_overlap_count:
+        raise ValueError("document-disjoint RAFT mining leaked documents across partitions")
+    manifest = {
+        "schema_version": 1,
+        **split.metadata(),
+        "negative_mining_scope": "split-before-mining",
+        "negative_strategy": negative_strategy,
+        "candidate_pool_size": candidate_pool_size,
+        "distractors": distractors,
+        "document_pools": {
+            "train_count": len(train_pool),
+            "validation_count": len(validation_pool),
+            "overlap_count": len(
+                {document.id for document in train_pool}
+                & {document.id for document in validation_pool}
+            ),
+        },
+        **audit.as_dict(),
+    }
+    return RAFTPartitions(train_rows, validation_rows, manifest)

@@ -11,7 +11,7 @@ from typing import Any
 from datasets import Dataset, load_dataset
 
 from rag_adapt_lab.data.io import write_jsonl
-from rag_adapt_lab.data.raft import build_raft_examples
+from rag_adapt_lab.data.raft import build_raft_partitions
 from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
 
@@ -106,6 +106,7 @@ def parse_args() -> argparse.Namespace:
         default="bm25-hard-negative",
     )
     parser.add_argument("--hard-negative-candidates", type=int, default=20)
+    parser.add_argument("--validation-ratio", type=float, default=0.1)
     parser.add_argument("--max-context-chars", type=int, default=1200)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -138,24 +139,34 @@ def main() -> None:
 
     train_documents = make_documents(train_rows, "train-doc")
     train_examples = make_examples(train_rows, "train")
-    raft_rows = build_raft_examples(
+    raft_partitions = build_raft_partitions(
         train_documents,
         train_examples,
+        validation_ratio=args.validation_ratio,
         distractors=args.distractors,
         seed=args.seed,
+        split_strategy="grouped",
+        group_by=("normalized_question",),
+        corpus_policy="shared-corpus",
         negative_strategy=args.negative_strategy,
         candidate_pool_size=args.hard_negative_candidates,
     )
-    sft_rows = [
+    examples_by_id = {example.id: example for example in train_examples}
+
+    def sft_rows(example_ids: list[str]) -> list[dict[str, Any]]:
+        return [
         {
-            "id": example.id,
+            "id": examples_by_id[example_id].id,
             "instruction": "Answer the question accurately and return only the concise answer.",
-            "input": example.question,
-            "output": example.reference_answer,
-            "metadata": example.metadata,
+            "input": examples_by_id[example_id].question,
+            "output": examples_by_id[example_id].reference_answer,
+            "metadata": examples_by_id[example_id].metadata,
         }
-        for example in train_examples
-    ]
+            for example_id in example_ids
+        ]
+
+    sft_train_rows = sft_rows([row.id for row in raft_partitions.train_rows])
+    sft_validation_rows = sft_rows([row.id for row in raft_partitions.validation_rows])
     eval_documents = make_documents(validation_rows, "eval-doc")
     eval_examples = make_examples(validation_rows[: args.eval_examples], "eval")
 
@@ -163,8 +174,10 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(args.output_dir / "train_documents.jsonl", train_documents)
-    write_jsonl(args.output_dir / "sft_train.jsonl", sft_rows)
-    write_jsonl(args.output_dir / "raft_train.jsonl", raft_rows)
+    write_jsonl(args.output_dir / "sft_train.jsonl", sft_train_rows)
+    write_jsonl(args.output_dir / "sft_validation.jsonl", sft_validation_rows)
+    write_jsonl(args.output_dir / "raft_train.jsonl", raft_partitions.train_rows)
+    write_jsonl(args.output_dir / "raft_validation.jsonl", raft_partitions.validation_rows)
     write_jsonl(args.output_dir / "eval_documents.jsonl", eval_documents)
     write_jsonl(args.output_dir / "eval.jsonl", eval_examples)
     manifest = {
@@ -172,14 +185,18 @@ def main() -> None:
         "dataset_revision": DATASET_REVISION,
         "license": "cc-by-sa-4.0",
         "seed": args.seed,
-        "train_examples": len(raft_rows),
-        "sft_examples": len(sft_rows),
+        "schema_version": 2,
+        "train_examples": len(raft_partitions.train_rows),
+        "validation_examples": len(raft_partitions.validation_rows),
+        "sft_train_examples": len(sft_train_rows),
+        "sft_validation_examples": len(sft_validation_rows),
         "eval_examples": len(eval_examples),
         "eval_documents": len(eval_documents),
         "distractors_per_train_example": args.distractors,
         "negative_strategy": args.negative_strategy,
         "hard_negative_candidates": args.hard_negative_candidates,
         "max_context_chars": args.max_context_chars,
+        "training_partition": raft_partitions.manifest,
         "train_eval_context_overlap": len(
             train_contexts & {row["context"] for row in validation_rows}
         ),

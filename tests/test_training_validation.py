@@ -6,6 +6,7 @@ from rag_adapt_lab.training.data import (
     deterministic_training_split,
     ensure_disjoint_training_rows,
     prompt_completion_records,
+    render_chat_prompt_completions,
 )
 from rag_adapt_lab.training.qlora import _load_training_split as load_training_split
 from rag_adapt_lab.training.qlora import build_sft_config_values
@@ -60,6 +61,36 @@ def test_prompt_completion_records_keep_oracle_labels_out_of_prompt() -> None:
     assert "| distractor" not in records[0]["prompt"].lower()
 
 
+class FakeChatTokenizer:
+    chat_template = "configured"
+    eos_token = "<eos>"
+
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, str]],
+        **kwargs: object,
+    ) -> str:
+        assert kwargs["enable_thinking"] is False
+        assert kwargs["tokenize"] is False
+        return f"USER:{conversation[0]['content']}\nASSISTANT:"
+
+
+def test_explicit_chat_rendering_preserves_completion_only_boundary() -> None:
+    records = prompt_completion_records(
+        [{"id": "sft", "input": "Question?", "output": "Answer."}],
+        mode="sft",
+        use_chat_template=True,
+    )
+    rendered = render_chat_prompt_completions(
+        records,
+        tokenizer=FakeChatTokenizer(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert "Answer." not in rendered[0]["prompt"]
+    assert rendered[0]["completion"] == "Answer.<eos>"
+    assert "(no documents provided)" in rendered[0]["prompt"]
+
+
 def test_sft_configuration_uses_completion_only_loss_and_best_model() -> None:
     values = build_sft_config_values(
         {
@@ -76,6 +107,7 @@ def test_sft_configuration_uses_completion_only_loss_and_best_model() -> None:
     assert values["load_best_model_at_end"] is True
     assert values["metric_for_best_model"] == "eval_loss"
     assert values["greater_is_better"] is False
+    assert "chat_template_kwargs" not in values  # TRL 0.24.0 has no such SFTConfig field.
 
 
 def test_best_model_step_intervals_must_align() -> None:

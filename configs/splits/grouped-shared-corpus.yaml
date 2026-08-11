@@ -1,0 +1,6 @@
+strategy: grouped
+validation_ratio: 0.1
+group_by:
+  - normalized_question
+corpus_policy: shared-corpus
+seed: 42

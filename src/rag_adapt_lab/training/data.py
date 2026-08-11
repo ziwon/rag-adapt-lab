@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import random
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
+from rag_adapt_lab.data.splitting import (
+    CorpusPolicy,
+    PartitionSplit,
+    SplitStrategy,
+    rows_fingerprint,
+    split_rows,
+)
 from rag_adapt_lab.data.validation import normalize_question
 
 from .formatting import (
@@ -19,13 +22,14 @@ from .formatting import (
 TrainingMode = Literal["sft", "raft"]
 
 
-@dataclass(frozen=True, slots=True)
-class TrainingSplit:
-    train_rows: list[dict[str, Any]]
-    validation_rows: list[dict[str, Any]]
-    method: str
-    seed: int
-    validation_ratio: float
+class ChatTemplateRenderer(Protocol):
+    chat_template: str | None
+    eos_token: str | None
+
+    def apply_chat_template(self, conversation: Any, **kwargs: Any) -> str: ...
+
+
+TrainingSplit = PartitionSplit
 
 
 def _row_id(row: Mapping[str, Any]) -> str:
@@ -65,27 +69,31 @@ def deterministic_training_split(
     validation_ratio: float,
     seed: int,
 ) -> TrainingSplit:
-    if not 0.0 <= validation_ratio < 1.0:
-        raise ValueError("validation_ratio must be in [0, 1)")
-    copied = [dict(row) for row in rows]
-    if validation_ratio == 0.0:
-        return TrainingSplit(copied, [], "none", seed, validation_ratio)
-    if len(copied) < 2:
-        raise ValueError("At least two rows are required for a validation split")
-    validation_count = max(1, round(len(copied) * validation_ratio))
-    validation_count = min(validation_count, len(copied) - 1)
-    indices = list(range(len(copied)))
-    random.Random(seed).shuffle(indices)
-    validation_indices = set(indices[:validation_count])
-    train = [row for index, row in enumerate(copied) if index not in validation_indices]
-    validation = [row for index, row in enumerate(copied) if index in validation_indices]
-    ensure_disjoint_training_rows(
-        train,
-        validation,
-        left_name="training split",
-        right_name="validation split",
+    return split_rows(
+        rows,
+        validation_ratio=validation_ratio,
+        seed=seed,
+        strategy="row",
     )
-    return TrainingSplit(train, validation, "deterministic-split", seed, validation_ratio)
+
+
+def configured_training_split(
+    rows: Sequence[dict[str, Any]],
+    *,
+    validation_ratio: float,
+    seed: int,
+    strategy: SplitStrategy = "row",
+    group_by: Sequence[str] = (),
+    corpus_policy: CorpusPolicy = "shared-corpus",
+) -> TrainingSplit:
+    return split_rows(
+        rows,
+        validation_ratio=validation_ratio,
+        seed=seed,
+        strategy=strategy,
+        group_by=group_by,
+        corpus_policy=corpus_policy,
+    )
 
 
 def prompt_completion_records(
@@ -121,11 +129,40 @@ def prompt_completion_records(
     return records
 
 
+def render_chat_prompt_completions(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    tokenizer: ChatTemplateRenderer,
+    chat_template_kwargs: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Render chat records explicitly while retaining a completion-only boundary."""
+    if not tokenizer.chat_template:
+        raise ValueError("use_chat_template=true requires a tokenizer chat template")
+    rendered: list[dict[str, str]] = []
+    for record in records:
+        prompt_messages = record.get("prompt")
+        completion_messages = record.get("completion")
+        if not isinstance(prompt_messages, list) or not isinstance(completion_messages, list):
+            raise ValueError("Expected conversational prompt/completion records")
+        prompt = tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **chat_template_kwargs,
+        )
+        if len(completion_messages) != 1 or not isinstance(completion_messages[0], Mapping):
+            raise ValueError("Expected exactly one assistant completion message")
+        completion = str(completion_messages[0].get("content", ""))
+        if not completion.strip():
+            raise ValueError("Assistant completion must not be empty")
+        rendered.append(
+            {
+                "prompt": prompt,
+                "completion": completion + (tokenizer.eos_token or ""),
+            }
+        )
+    return rendered
+
+
 def split_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
-    payload = json.dumps(
-        [dict(row) for row in rows],
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return rows_fingerprint(rows)
