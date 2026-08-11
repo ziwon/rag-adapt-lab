@@ -12,13 +12,24 @@ class DenseRetriever(Retriever):
     DEFAULT_MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
     DEFAULT_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 
-    def __init__(self, model_id: str = DEFAULT_MODEL_ID, *, revision: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str = DEFAULT_MODEL_ID,
+        *,
+        revision: str | None = None,
+        normalize_embeddings: bool = True,
+        batch_size: int = 16,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         self.model_id = model_id
         if revision is None:
             if model_id != self.DEFAULT_MODEL_ID:
                 raise ValueError("A pinned revision is required when using a custom dense model")
             revision = self.DEFAULT_REVISION
         self.revision = require_pinned_hf_revision(revision, model_id=model_id)
+        self.normalize_embeddings = normalize_embeddings
+        self.batch_size = batch_size
         self.documents: list[Document] = []
         self._model = None
         self._embeddings: np.ndarray | None = None
@@ -38,7 +49,8 @@ class DenseRetriever(Retriever):
         self._embeddings = np.asarray(
             model.encode(
                 [doc.text for doc in documents],
-                normalize_embeddings=True,
+                normalize_embeddings=self.normalize_embeddings,
+                batch_size=self.batch_size,
                 show_progress_bar=True,
             )
         )
@@ -46,7 +58,13 @@ class DenseRetriever(Retriever):
     def search(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
         if self._model is None or self._embeddings is None:
             raise RuntimeError("Call index() before search().")
-        q = np.asarray(self._model.encode([query], normalize_embeddings=True))[0]
+        q = np.asarray(
+            self._model.encode(
+                [query],
+                normalize_embeddings=self.normalize_embeddings,
+                batch_size=self.batch_size,
+            )
+        )[0]
         scores = self._embeddings @ q
         indices = np.argsort(-scores)[:top_k]
         return [

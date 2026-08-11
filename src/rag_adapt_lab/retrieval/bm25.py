@@ -12,9 +12,13 @@ def _tokenize(text: str) -> list[str]:
 
 
 class BM25Retriever(Retriever):
-    def __init__(self) -> None:
+    def __init__(self, *, lowercase: bool = True) -> None:
+        self.lowercase = lowercase
         self.documents: list[Document] = []
         self._bm25 = None
+
+    def _tokenize(self, text: str) -> list[str]:
+        return _tokenize(text) if self.lowercase else re.findall(r"\w+", text, flags=re.UNICODE)
 
     def index(self, documents: list[Document]) -> None:
         try:
@@ -22,12 +26,12 @@ class BM25Retriever(Retriever):
         except ImportError as exc:
             raise RuntimeError("Install the RAG extras: pip install -e '.[rag]'") from exc
         self.documents = documents
-        self._bm25 = BM25Okapi([_tokenize(doc.text) for doc in documents])
+        self._bm25 = BM25Okapi([self._tokenize(doc.text) for doc in documents])
 
     def search(self, query: str, top_k: int = 5) -> list[RetrievalResult]:
         if self._bm25 is None:
             raise RuntimeError("Call index() before search().")
-        scores = self._bm25.get_scores(_tokenize(query))
+        scores = self._bm25.get_scores(self._tokenize(query))
         ranked = sorted(enumerate(scores), key=lambda item: float(item[1]), reverse=True)[:top_k]
         return [
             RetrievalResult(document=self.documents[idx], score=float(score), rank=rank + 1)
