@@ -1,0 +1,10 @@
+name: qwen2.5-0.5b-instruct
+model_id: Qwen/Qwen2.5-0.5B-Instruct
+revision: 7ae557604adf67be50417f59c2c2f167def9a775
+trust_remote_code: false
+torch_dtype: bfloat16
+attn_implementation: sdpa
+max_seq_length: 576
+generation:
+  max_new_tokens: 32
+  do_sample: false
