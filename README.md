@@ -15,7 +15,7 @@ The project uses **Weights & Biases Models** for training/config/checkpoint/data
 
 ## Why this project exists
 
-Teams often jump directly from a general-purpose LLM to fine-tuning. That can be expensive and unnecessary. This repository makes the alternatives comparable with the same corpus, questions, retrieval pipeline, model family, and metrics.
+Teams often jump directly from a general-purpose LLM to fine-tuning. That can be expensive and unnecessary. This repository makes the alternatives comparable with the same corpus, held-out questions, retrieval pipeline, model family, and metrics. Fine-tuning examples come from a separate labeled training split.
 
 The intended output is not merely a higher score. It is a reproducible answer to questions such as:
 
@@ -34,7 +34,7 @@ The default profiles target single-GPU development and experimentation:
 | `rtx_16gb` | smoke tests, development, primary QLoRA | 4B–8B |
 | `rtx_24gb` | primary experiments, longer context, larger adapters | 8B–14B |
 
-The included Qwen configs are examples, not hard requirements. Any compatible causal LM can be added through config.
+The included Qwen configs are examples, not hard requirements. Their Hub revisions are immutable commit SHAs and remote model code is disabled. Any compatible causal LM can be added through config with the same safeguards.
 
 ## Repository layout
 
@@ -81,6 +81,16 @@ Only `id` and `text` are required.
 ```
 
 Optional fields include `evidence` and arbitrary metadata.
+
+### `train_qa.jsonl` (for RAFT preparation)
+
+The labeled RAFT source uses the same schema as `eval.jsonl`, but it must be a distinct training split:
+
+```json
+{"id":"train-q-001","question":"What is ...?","reference_answer":"...","relevant_doc_ids":["doc-001"]}
+```
+
+`raglab prepare-raft --held-out-eval ...` rejects reused record IDs and normalized questions so evaluation examples cannot accidentally become training examples.
 
 ### `sft.jsonl` (optional)
 
@@ -146,12 +156,13 @@ raglab validate-data \
 ```bash
 raglab prepare-raft \
   --documents examples/demo/documents.jsonl \
-  --eval-set examples/demo/eval.jsonl \
+  --training-set examples/demo/train_qa.jsonl \
+  --held-out-eval examples/demo/eval.jsonl \
   --output data/raft_train.jsonl \
   --distractors 2
 ```
 
-This basic builder uses annotated relevant document IDs as oracle evidence and samples non-relevant documents as distractors. For production research, replace the distractor sampler with BM25/dense hard negatives.
+This basic builder uses training-only relevant document annotations as oracle evidence and samples non-relevant documents as distractors. The relevance labels remain dataset metadata and are not rendered into the model prompt. For production research, replace the random sampler with BM25/dense hard negatives.
 
 ### 5. Run retrieval evaluation
 
@@ -191,16 +202,56 @@ raglab benchmark \
   --eval-set examples/demo/eval.jsonl
 ```
 
+### Public Hugging Face smoke experiment
+
+The included SQuAD workflow pins the public dataset and base-model revisions, creates disjoint training/evaluation splits, trains a small LoRA adapter, and compares paired base/tuned predictions:
+
+```bash
+python scripts/prepare_hf_squad.py \
+  --output-dir data/hf_squad_smoke \
+  --cache-dir .cache/huggingface
+
+raglab train \
+  --config configs/recipes/hf-squad-raft-smoke.yaml \
+  --train-file data/hf_squad_smoke/raft_train.jsonl
+
+python scripts/evaluate_hf_squad.py \
+  --model-config configs/models/qwen2.5-0.5b-instruct.yaml \
+  --adapter outputs/hf-squad-raft-chat-smoke/adapter \
+  --documents data/hf_squad_smoke/eval_documents.jsonl \
+  --eval-set data/hf_squad_smoke/eval.jsonl \
+  --output-dir outputs/hf-squad-raft-chat-smoke/evaluation
+```
+
+Training and evaluation require the `train` and `rag` extras; model evaluation requires CUDA.
+
+### Reproducible local Compose stack
+
+The repository includes a development Compose environment with pinned SeaweedFS and W&B Server
+images, S3 bucket initialization, persistent caches, and GPU profiles for the lab and public-data
+jobs:
+
+```bash
+cp .env.compose.example .env.compose
+# Add WANDB_LICENSE, then:
+docker compose --env-file .env.compose up -d --wait seaweedfs seaweed-init wandb
+docker compose --env-file .env.compose --profile lab up -d --build --wait lab
+```
+
+Weave uses the same self-hosted W&B endpoint when the W&B license enables Weave; it is not a
+separate standalone container. See [Local Compose environment](docs/local_compose.md) for setup,
+service URLs, job commands, storage behavior, and the production deployment caveat.
+
 ## Experiment model
 
 A recommended experiment is:
 
 ```text
-                 Same corpus / same evaluation set
+              Same corpus / one held-out evaluation set
                               │
         ┌─────────────────────┼──────────────────────┐
         │                     │                      │
-      Base                   RAG                  Training
+      Base                   RAG            Separate train split
                                                      │
                                          ┌───────────┴───────────┐
                                          │                       │
@@ -324,8 +375,8 @@ Out of scope for v0.1:
 
 For every experiment, record:
 
-- model ID and revision
-- tokenizer revision
+- model ID and immutable commit revision
+- tokenizer commit revision
 - dataset artifact/version
 - retrieval index configuration
 - train/eval split seed
