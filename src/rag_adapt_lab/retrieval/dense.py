@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import numpy as np
 
+from rag_adapt_lab.config import require_pinned_hf_revision
 from rag_adapt_lab.data.schema import Document
 
 from .base import RetrievalResult, Retriever
 
 
 class DenseRetriever(Retriever):
-    def __init__(self, model_id: str = "Qwen/Qwen3-Embedding-0.6B") -> None:
+    DEFAULT_MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
+    DEFAULT_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+
+    def __init__(self, model_id: str = DEFAULT_MODEL_ID, *, revision: str | None = None) -> None:
         self.model_id = model_id
+        if revision is None:
+            if model_id != self.DEFAULT_MODEL_ID:
+                raise ValueError("A pinned revision is required when using a custom dense model")
+            revision = self.DEFAULT_REVISION
+        self.revision = require_pinned_hf_revision(revision, model_id=model_id)
         self.documents: list[Document] = []
         self._model = None
         self._embeddings: np.ndarray | None = None
@@ -20,9 +29,14 @@ class DenseRetriever(Retriever):
         except ImportError as exc:
             raise RuntimeError("Install the RAG extras: pip install -e '.[rag]'") from exc
         self.documents = documents
-        self._model = SentenceTransformer(self.model_id)
+        model = SentenceTransformer(
+            self.model_id,
+            revision=self.revision,
+            trust_remote_code=False,
+        )
+        self._model = model
         self._embeddings = np.asarray(
-            self._model.encode(
+            model.encode(
                 [doc.text for doc in documents],
                 normalize_embeddings=True,
                 show_progress_bar=True,

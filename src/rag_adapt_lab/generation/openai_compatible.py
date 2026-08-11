@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from .base import GenerationResult, Generator
+from .prompts import format_rag_user_prompt
 
 
 class OpenAICompatibleGenerator(Generator):
@@ -17,8 +18,7 @@ class OpenAICompatibleGenerator(Generator):
         self.model = model
 
     def generate(self, *, question: str, contexts: list[str] | None = None) -> GenerationResult:
-        context_block = "\n\n".join(contexts or [])
-        prompt = question if not context_block else f"Context:\n{context_block}\n\nQuestion:\n{question}"
+        prompt = format_rag_user_prompt(question=question, contexts=contexts or [])
         start = time.perf_counter()
         response = self.client.chat.completions.create(
             model=self.model,

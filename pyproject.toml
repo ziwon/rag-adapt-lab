@@ -28,13 +28,13 @@ rag = [
   "openai>=1.50,<3",
 ]
 train = [
-  "torch>=2.4",
-  "transformers>=4.48,<6",
-  "datasets>=3.0,<5",
-  "accelerate>=1.0,<2",
-  "peft>=0.14,<1",
-  "trl>=0.24,<0.28",
-  "bitsandbytes>=0.45,<1; platform_system == 'Linux'",
+  "torch>=2.11,<2.12",
+  "transformers>=4.57.6,<4.58",
+  "datasets>=4.8.5,<4.9",
+  "accelerate>=1.14,<1.15",
+  "peft>=0.20,<0.21",
+  "trl>=0.24,<0.25",
+  "bitsandbytes>=0.45,<0.51; platform_system == 'Linux'",
 ]
 wandb = [
   "wandb>=0.19,<1",
@@ -45,6 +45,7 @@ dev = [
   "pytest-cov>=5,<7",
   "ruff>=0.8,<1",
   "mypy>=1.13,<2",
+  "types-PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
@@ -60,6 +61,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

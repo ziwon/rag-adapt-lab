@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rag_adapt_lab.config import load_yaml, resolve_relative
+from rag_adapt_lab.config import load_yaml, resolve_relative, validate_hf_model_config
 from rag_adapt_lab.data.io import read_jsonl
 
-from .formatting import format_raft_row, format_sft_row
+from .formatting import format_raft_row, format_raft_user_prompt, format_sft_row
 
 
 def train_qlora(*, recipe_config: str | Path, train_file: str | Path) -> Path:
@@ -30,37 +30,81 @@ def train_qlora(*, recipe_config: str | Path, train_file: str | Path) -> Path:
     training_path = resolve_relative(recipe_path, recipe["training"]["config"])
     model_cfg = load_yaml(model_path)
     training_cfg = load_yaml(training_path)
+    model_id, model_revision = validate_hf_model_config(model_cfg)
     mode = recipe["training"].get("mode", "sft")
+    if mode not in {"sft", "raft"}:
+        raise ValueError(f"Unsupported training mode: {mode!r}")
     output_dir = Path(recipe.get("output_dir", f"outputs/{recipe['name']}"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = read_jsonl(train_file)
-    formatter = format_raft_row if mode == "raft" else format_sft_row
-    dataset = Dataset.from_dict({"text": [formatter(row) for row in rows]})
-
-    compute_dtype = torch.bfloat16 if training_cfg.get("bnb_4bit_compute_dtype") == "bfloat16" else torch.float16
-    quant_cfg = BitsAndBytesConfig(
-        load_in_4bit=bool(training_cfg.get("load_in_4bit", True)),
-        bnb_4bit_quant_type=training_cfg.get("bnb_4bit_quant_type", "nf4"),
-        bnb_4bit_use_double_quant=bool(training_cfg.get("bnb_4bit_use_double_quant", True)),
-        bnb_4bit_compute_dtype=compute_dtype,
+    compute_dtype = (
+        torch.bfloat16
+        if training_cfg.get("bnb_4bit_compute_dtype") == "bfloat16"
+        else torch.float16
     )
+    load_in_4bit = bool(training_cfg.get("load_in_4bit", True))
+    quant_cfg = None
+    if load_in_4bit:
+        quant_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=training_cfg.get("bnb_4bit_quant_type", "nf4"),
+            bnb_4bit_use_double_quant=bool(training_cfg.get("bnb_4bit_use_double_quant", True)),
+            bnb_4bit_compute_dtype=compute_dtype,
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg["model_id"],
-        revision=model_cfg.get("revision", "main"),
-        trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
+        model_id,
+        revision=model_revision,
+        trust_remote_code=False,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_cfg["model_id"],
-        revision=model_cfg.get("revision", "main"),
-        trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
-        quantization_config=quant_cfg,
-        device_map="auto",
-    )
+    rows = read_jsonl(train_file)
+    if not rows:
+        raise ValueError(f"Training file is empty: {train_file}")
+    if bool(training_cfg.get("use_chat_template", False)):
+        texts = []
+        for row in rows:
+            if mode == "raft":
+                user_content = format_raft_user_prompt(row)
+                assistant_content = row.get("answer", "")
+            else:
+                instruction = row.get("instruction", "Answer accurately.")
+                user_input = row.get("input", row.get("question", ""))
+                user_content = f"{instruction}\n\n{user_input}".strip()
+                assistant_content = row.get("output", row.get("answer", ""))
+            texts.append(
+                tokenizer.apply_chat_template(
+                    [
+                        {"role": "user", "content": user_content},
+                        {"role": "assistant", "content": assistant_content},
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+            )
+    else:
+        formatter = format_raft_row if mode == "raft" else format_sft_row
+        texts = [formatter(row) for row in rows]
+    dataset = Dataset.from_dict({"text": texts})
+
+    dtype_by_name = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    model_kwargs: dict[str, Any] = {
+        "revision": model_revision,
+        "trust_remote_code": False,
+        "device_map": "auto",
+        "torch_dtype": dtype_by_name.get(model_cfg.get("torch_dtype", "bfloat16")),
+    }
+    if quant_cfg is not None:
+        model_kwargs["quantization_config"] = quant_cfg
+    if model_cfg.get("attn_implementation"):
+        model_kwargs["attn_implementation"] = model_cfg["attn_implementation"]
+    model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
     model.config.use_cache = False
 
     peft_cfg = LoraConfig(
@@ -96,7 +140,9 @@ def train_qlora(*, recipe_config: str | Path, train_file: str | Path) -> Path:
         peft_config=peft_cfg,
         args=SFTConfig(**args),
     )
-    trainer.train()
+    result = trainer.train()
+    trainer.save_metrics("train", result.metrics)
+    trainer.save_state()
     trainer.save_model(str(output_dir / "adapter"))
     tokenizer.save_pretrained(str(output_dir / "adapter"))
     return output_dir / "adapter"

@@ -1,5 +1,6 @@
 method: qlora
 load_in_4bit: true
+use_chat_template: true
 bnb_4bit_quant_type: nf4
 bnb_4bit_use_double_quant: true
 bnb_4bit_compute_dtype: bfloat16
