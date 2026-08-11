@@ -1,22 +1,53 @@
-name: ci
+name: validation
 
 on:
   push:
   pull_request:
 
 jobs:
-  test:
+  unit-tests:
+    name: Unit tests (core/dev dependencies)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install
+          cache: pip
+      - name: Install core and development dependencies
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Ruff
         run: ruff check .
-      - name: Tests
-        run: pytest
+      - name: Unit tests
+        run: pytest -m 'not integration and not gpu'
+
+  cpu-integration-tests:
+    name: CPU integration (real RAG/Transformers/TRL/PEFT)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install pinned RAG, training, and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[rag,train,dev]'
+      - name: Real dependency integration tests
+        run: pytest -m 'integration and not gpu'
+      - name: Compose configuration validation
+        run: docker compose --env-file .env.compose.example config --quiet
+
+  validation-summary:
+    name: Unit and CPU integration validation passed
+    if: always()
+    needs: [unit-tests, cpu-integration-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both validation layers
+        run: |
+          test '${{ needs.unit-tests.result }}' = success
+          test '${{ needs.cpu-integration-tests.result }}' = success

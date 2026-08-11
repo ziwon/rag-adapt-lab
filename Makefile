@@ -1,4 +1,4 @@
-.PHONY: install test lint format demo compose-config compose-up compose-down compose-lab
+.PHONY: install test test-unit test-integration lint format demo compose-config compose-up compose-down compose-lab
 
 COMPOSE_ENV ?= .env.compose.example
 COMPOSE = docker compose --env-file $(COMPOSE_ENV)
@@ -8,6 +8,12 @@ install:
 
 test:
 	pytest
+
+test-unit:
+	pytest -m 'not integration and not gpu'
+
+test-integration:
+	pytest -m 'integration and not gpu'
 
 lint:
 	ruff check .
