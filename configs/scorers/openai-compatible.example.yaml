@@ -1,0 +1,10 @@
+mode: enabled
+lexical_groundedness:
+  claim_support_threshold: 0.5
+citation_metrics: false
+judge:
+  kind: openai-compatible
+  base_url: http://localhost:8000/v1
+  model: local-judge-model
+  model_revision: deployment-specific-immutable-id
+  api_key_env: JUDGE_API_KEY

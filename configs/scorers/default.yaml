@@ -1,0 +1,6 @@
+mode: enabled
+lexical_groundedness:
+  claim_support_threshold: 0.5
+citation_metrics: false
+judge:
+  kind: disabled
