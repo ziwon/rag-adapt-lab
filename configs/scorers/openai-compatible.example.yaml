@@ -8,3 +8,14 @@ judge:
   model: local-judge-model
   model_revision: deployment-specific-immutable-id
   api_key_env: JUDGE_API_KEY
+  strict: false
+  timeout_seconds: 30
+  connection_timeout_seconds: 10
+  read_timeout_seconds: 30
+  max_retries: 2
+  retry_backoff_seconds: 0.5
+  max_response_bytes: 32768
+  cache: true
+  cache_path: .cache/raglab/judge-cache.json
+  concurrency_limit: 1
+  structured_output: true

@@ -4,3 +4,7 @@ lexical_groundedness:
 citation_metrics: false
 judge:
   kind: disabled
+  strict: false
+  timeout_seconds: 30
+  max_retries: 2
+  cache: true

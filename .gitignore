@@ -13,6 +13,7 @@ dist/
 /.env.compose
 /wandb/
 /.weave/
+/.cache/
 /data/
 /outputs/
 /checkpoints/
