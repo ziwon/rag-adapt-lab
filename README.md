@@ -4,6 +4,9 @@ A domain-neutral, W&B-first research harness for answering a practical question:
 
 > **When is plain RAG enough, and when does domain adaptation (SFT or RAFT) provide measurable value?**
 
+<img width="1024" height="576" alt="ChatGPT Image Aug 12, 2026, 01_02_27 AM (1)" src="https://github.com/user-attachments/assets/018c71c8-a955-4eae-ae12-1f6bb5506915" />
+
+
 `rag-adapt-lab` is designed for local and self-hosted LLM experiments on commodity NVIDIA GPUs. It compares four first-class recipes under a shared data contract and evaluation protocol:
 
 1. **Base** — model only, no retrieval, no training
