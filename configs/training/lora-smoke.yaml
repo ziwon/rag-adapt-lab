@@ -1,6 +1,14 @@
 method: lora
 load_in_4bit: false
 use_chat_template: true
+validation_split_ratio: 0.1
+eval_strategy: epoch
+eval_steps: 25
+per_device_eval_batch_size: 4
+metric_for_best_model: eval_loss
+greater_is_better: false
+early_stopping_patience: 2
+save_total_limit: 2
 bnb_4bit_compute_dtype: bfloat16
 lora_r: 8
 lora_alpha: 16
