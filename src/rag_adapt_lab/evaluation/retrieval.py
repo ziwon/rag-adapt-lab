@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from rag_adapt_lab.data.schema import EvalExample
@@ -31,6 +32,27 @@ def evaluate_retriever(
     *,
     top_k: int = 5,
 ) -> RetrievalMetrics:
+    rankings = {
+        example.id: [
+            result.document.id for result in retriever.search(example.question, top_k=top_k)
+        ]
+        for example in examples
+    }
+    return evaluate_rankings(examples, rankings, top_k=top_k)
+
+
+def evaluate_rankings(
+    examples: Sequence[EvalExample],
+    rankings: Mapping[str, Sequence[str]],
+    *,
+    top_k: int = 5,
+) -> RetrievalMetrics:
+    """Evaluate precomputed rankings without issuing retrieval twice.
+
+    Benchmark execution records one immutable ranking per held-out example and
+    reuses it for every retrieval-enabled recipe. This helper keeps metric
+    computation on exactly those recorded rankings.
+    """
     if top_k < 1:
         raise ValueError("top_k must be positive")
     recalls: list[float] = []
@@ -39,11 +61,9 @@ def evaluate_retriever(
     ndcgs: list[float] = []
 
     for example in examples:
-        relevant = set(example.relevant_doc_ids)
-        if not relevant:
-            continue
-        results = retriever.search(example.question, top_k=top_k)
-        ranked_ids = [item.document.id for item in results[:top_k]]
+        if example.id not in rankings:
+            raise ValueError(f"Missing retrieval ranking for example {example.id!r}")
+        ranked_ids = list(rankings[example.id][:top_k])
         seen: set[str] = set()
         duplicates: set[str] = set()
         for doc_id in ranked_ids:
@@ -55,6 +75,9 @@ def evaluate_retriever(
                 f"Retriever returned duplicate document IDs for example {example.id!r}: "
                 f"{sorted(duplicates)}"
             )
+        relevant = set(example.relevant_doc_ids)
+        if not relevant:
+            continue
         found = [doc_id for doc_id in ranked_ids if doc_id in relevant]
 
         recalls.append(len(set(found)) / len(relevant))

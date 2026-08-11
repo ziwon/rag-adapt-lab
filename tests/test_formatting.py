@@ -33,4 +33,8 @@ def test_training_and_inference_share_the_same_rag_prompt() -> None:
         contexts=["first", "second"],
     )
     assert format_raft_user_prompt(row) == expected
-    assert format_rag_user_prompt(question="No retrieval", contexts=[]) == "No retrieval"
+    base_prompt = format_rag_user_prompt(question="No retrieval", contexts=[])
+    assert "### Instruction" in base_prompt
+    assert "(no documents provided)" in base_prompt
+    assert "### Question\nNo retrieval" in base_prompt
+    assert base_prompt.endswith("### Documents\n(no documents provided)")
