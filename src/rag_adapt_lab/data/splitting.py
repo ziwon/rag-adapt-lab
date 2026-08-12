@@ -85,6 +85,38 @@ def rows_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def source_partition_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Hash representation-independent source identities for SFT/RAFT pairing.
+
+    Full dataset fingerprints intentionally differ after RAFT context mining.
+    This fingerprint uses the stable source ID, normalized question, and target
+    answer so two adaptation modes can prove that they were trained and
+    validated on the same underlying examples and labels.
+    """
+    identities: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for row in rows:
+        source_id = str(row.get("id", "")).strip()
+        question = normalize_question(row_question(row))
+        answer = str(
+            row.get("answer", row.get("output", row.get("reference_answer", "")))
+        ).strip()
+        if not source_id or not question or not answer:
+            raise ValueError(
+                "Verifiable training partitions require non-empty source IDs, questions, "
+                "and answers"
+            )
+        if source_id in seen_ids:
+            raise ValueError(f"Training partition contains duplicate source ID {source_id!r}")
+        seen_ids.add(source_id)
+        identities.append(
+            {"id": source_id, "normalized_question": question, "answer": answer}
+        )
+    return rows_fingerprint(
+        sorted(identities, key=lambda item: (item["id"], item["normalized_question"]))
+    )
+
+
 def row_question(row: Mapping[str, Any]) -> str:
     return str(row.get("question", row.get("input", "")))
 
@@ -177,6 +209,8 @@ def enforce_partition_policy(
     validation_rows: Sequence[Mapping[str, Any]],
     *,
     corpus_policy: CorpusPolicy,
+    strategy: SplitStrategy = "row",
+    group_by: Sequence[str] = (),
 ) -> PartitionAudit:
     if corpus_policy not in {"shared-corpus", "document-disjoint"}:
         raise ValueError(f"Unsupported corpus policy: {corpus_policy!r}")
@@ -185,6 +219,21 @@ def enforce_partition_policy(
         raise ValueError(
             "Training and validation partitions share normalized questions; use grouped splitting"
         )
+    if strategy not in {"row", "grouped"}:
+        raise ValueError(f"Unsupported split strategy: {strategy!r}")
+    if strategy == "grouped":
+        train_tokens = set().union(*(_group_tokens(row, group_by) for row in train_rows)) \
+            if train_rows else set()
+        validation_tokens = set().union(
+            *(_group_tokens(row, group_by) for row in validation_rows)
+        ) if validation_rows else set()
+        overlaps = sorted(train_tokens & validation_tokens)
+        if overlaps:
+            details = [f"{field}={value}" for field, value in overlaps[:10]]
+            raise ValueError(
+                "Training and validation partitions share configured grouping values: "
+                + ", ".join(details)
+            )
     if corpus_policy == "document-disjoint" and audit.document_overlap_count:
         raise ValueError(
             "document-disjoint policy was violated: training and validation documents overlap"
@@ -308,7 +357,13 @@ def split_rows(
     }
     train = [row for index, row in enumerate(copied) if index not in validation_indices]
     validation = [row for index, row in enumerate(copied) if index in validation_indices]
-    audit = enforce_partition_policy(train, validation, corpus_policy=corpus_policy)
+    audit = enforce_partition_policy(
+        train,
+        validation,
+        corpus_policy=corpus_policy,
+        strategy=strategy,
+        group_by=group_by,
+    )
     return PartitionSplit(
         train,
         validation,

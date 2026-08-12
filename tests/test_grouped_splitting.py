@@ -1,6 +1,6 @@
 from rag_adapt_lab.data.raft import build_raft_partitions
 from rag_adapt_lab.data.schema import Document, EvalExample
-from rag_adapt_lab.data.splitting import split_rows
+from rag_adapt_lab.data.splitting import source_partition_fingerprint, split_rows
 
 
 def grouped_rows() -> list[dict[str, object]]:
@@ -145,3 +145,11 @@ def test_impossible_grouping_constraints_raise_clear_error() -> None:
         assert "one connected group" in str(exc)
     else:
         raise AssertionError("Expected impossible grouped split to fail")
+
+
+def test_source_partition_fingerprint_is_representation_independent_but_label_sensitive() -> None:
+    sft = [{"id": "q1", "input": "What?", "output": "Answer"}]
+    raft = [{"id": "q1", "question": " what? ", "answer": "Answer", "contexts": []}]
+    changed_label = [{"id": "q1", "question": "What?", "answer": "Different"}]
+    assert source_partition_fingerprint(sft) == source_partition_fingerprint(raft)
+    assert source_partition_fingerprint(sft) != source_partition_fingerprint(changed_label)

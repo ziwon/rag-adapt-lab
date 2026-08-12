@@ -128,7 +128,7 @@ class TransformersGenerator(Generator):
             trust_remote_code=False,
         )
         self.tokenizer.padding_side = "left"
-        # Question and highest-ranked documents occur first in prompt v3, so
+        # Question and highest-ranked documents occur first in prompt v4, so
         # right truncation retains the most decision-relevant input.
         self.tokenizer.truncation_side = "right"
         if self.tokenizer.pad_token is None:

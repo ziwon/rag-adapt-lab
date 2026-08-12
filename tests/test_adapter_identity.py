@@ -41,6 +41,8 @@ def write_adapter_manifest(
         "chat_template_kwargs": {},
         "training_dataset_fingerprint": "1" * 64,
         "validation_dataset_fingerprint": "2" * 64,
+        "training_source_fingerprint": "4" * 64,
+        "validation_source_fingerprint": "5" * 64,
         "held_out_evaluation_sha256": eval_hash,
         "training_configuration_sha256": "3" * 64,
         "adapter_artifact_sha256": artifact_sha256(path),
@@ -67,6 +69,7 @@ def test_adapter_identity_accepts_complete_verified_manifest(tmp_path: Path, mod
     result = validate(tmp_path, expected_mode=mode)
     assert result.verified is True
     assert result.adaptation_mode == mode
+    assert result.training_source_fingerprint == "4" * 64
 
 
 def test_adapter_identity_rejects_wrong_adaptation_mode(tmp_path: Path) -> None:

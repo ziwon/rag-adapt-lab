@@ -13,7 +13,11 @@ from rag_adapt_lab.config import (
     validate_hf_model_config,
 )
 from rag_adapt_lab.data.io import load_eval, read_jsonl
-from rag_adapt_lab.data.splitting import count_groups, enforce_partition_policy
+from rag_adapt_lab.data.splitting import (
+    count_groups,
+    enforce_partition_policy,
+    source_partition_fingerprint,
+)
 from rag_adapt_lab.generation.prompts import rag_prompt_provenance
 from rag_adapt_lab.provenance import (
     ADAPTER_MANIFEST_FILENAME,
@@ -101,6 +105,14 @@ def build_sft_config_values(
     return values
 
 
+def require_verifiable_training_prompt(training_cfg: Mapping[str, Any]) -> None:
+    if training_cfg.get("use_chat_template") is not True:
+        raise ValueError(
+            "Verifiable adapter training requires use_chat_template=true so the training "
+            "prompt exactly matches benchmark inference"
+        )
+
+
 def _load_training_split(
     *,
     train_file: str | Path,
@@ -116,6 +128,12 @@ def _load_training_split(
         raise ValueError(f"Training file is empty: {train_file}")
 
     configured_split = dict(split_config or {})
+    resolved_validation_ratio = float(
+        configured_split.get("validation_ratio", validation_ratio)
+    )
+    resolved_seed = int(configured_split.get("seed", seed))
+    if not 0.0 <= resolved_validation_ratio < 1.0:
+        raise ValueError("split.validation_ratio must be in [0, 1)")
     strategy = str(configured_split.get("strategy", "row"))
     if strategy not in {"row", "grouped"}:
         raise ValueError("split.strategy must be 'row' or 'grouped'")
@@ -125,6 +143,11 @@ def _load_training_split(
     ):
         raise ValueError("split.group_by must be a list of field names")
     group_by = tuple(group_by_value)
+    recorded_group_by = (
+        tuple(dict.fromkeys(["normalized_question", *group_by]))
+        if strategy == "grouped"
+        else ()
+    )
     corpus_policy = str(configured_split.get("corpus_policy", "shared-corpus"))
     if corpus_policy not in {"shared-corpus", "document-disjoint"}:
         raise ValueError(
@@ -148,15 +171,17 @@ def _load_training_split(
             rows,
             validation_rows,
             corpus_policy=corpus_policy,  # type: ignore[arg-type]
+            strategy=strategy,  # type: ignore[arg-type]
+            group_by=group_by,
         )
         split = TrainingSplit(
             rows,
             validation_rows,
             "explicit-files",
-            seed,
+            resolved_seed,
             len(validation_rows) / (len(rows) + len(validation_rows)),
             strategy,  # type: ignore[arg-type]
-            group_by,
+            recorded_group_by,
             corpus_policy,  # type: ignore[arg-type]
             count_groups(
                 rows,
@@ -175,8 +200,8 @@ def _load_training_split(
     else:
         split = configured_training_split(
             rows,
-            validation_ratio=validation_ratio,
-            seed=seed,
+            validation_ratio=resolved_validation_ratio,
+            seed=resolved_seed,
             strategy=strategy,  # type: ignore[arg-type]
             group_by=group_by,
             corpus_policy=corpus_policy,  # type: ignore[arg-type]
@@ -253,7 +278,7 @@ def train_qlora(
         raise ValueError(
             "Thinking-enabled adapter training is not supported by the current answer-only "
             "completion schema; use the benchmark's non-thinking condition or provide an "
-            "externally trained, schema-v2 verified thinking adapter"
+            "externally trained, schema-v3 verified thinking adapter"
         )
     mode = recipe["training"].get("mode", "sft")
     if mode not in {"sft", "raft"}:
@@ -272,7 +297,12 @@ def train_qlora(
             training_cfg.get("split") if isinstance(training_cfg.get("split"), Mapping) else None
         ),
     )
-    use_chat_template = bool(training_cfg.get("use_chat_template", False))
+    require_verifiable_training_prompt(training_cfg)
+    use_chat_template = True
+    train_fingerprint = split_fingerprint(split.train_rows)
+    validation_fingerprint = split_fingerprint(split.validation_rows)
+    training_source_fingerprint = source_partition_fingerprint(split.train_rows)
+    validation_source_fingerprint = source_partition_fingerprint(split.validation_rows)
     train_records = prompt_completion_records(
         split.train_rows,
         mode=mode,
@@ -381,8 +411,6 @@ def train_qlora(
     tokenizer.save_pretrained(str(adapter_path))
 
     prompt_provenance = rag_prompt_provenance()
-    train_fingerprint = split_fingerprint(split.train_rows)
-    validation_fingerprint = split_fingerprint(split.validation_rows)
     held_out_evaluation_sha256 = file_sha256(held_out_eval_file)
     training_configuration_sha256 = canonical_sha256(
         {
@@ -407,6 +435,8 @@ def train_qlora(
         "training_configuration_sha256": training_configuration_sha256,
         "training_dataset_fingerprint": train_fingerprint,
         "validation_dataset_fingerprint": validation_fingerprint,
+        "training_source_fingerprint": training_source_fingerprint,
+        "validation_source_fingerprint": validation_source_fingerprint,
         "held_out_evaluation_sha256": held_out_evaluation_sha256,
         "configuration_files": {
             "recipe": _file_record(recipe_path),
@@ -458,6 +488,8 @@ def train_qlora(
                 "chat_template_kwargs": chat_template_kwargs,
                 "training_dataset_fingerprint": train_fingerprint,
                 "validation_dataset_fingerprint": validation_fingerprint,
+                "training_source_fingerprint": training_source_fingerprint,
+                "validation_source_fingerprint": validation_source_fingerprint,
                 "held_out_evaluation_sha256": held_out_evaluation_sha256,
                 "training_configuration_sha256": training_configuration_sha256,
                 "adapter_artifact_sha256": adapter_artifact_sha256,

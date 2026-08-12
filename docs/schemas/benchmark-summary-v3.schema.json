@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-adapt-lab.local/schemas/benchmark-summary-v3.schema.json",
+  "title": "rag-adapt-lab benchmark summary v3",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "configuration",
+    "provenance",
+    "retrieval_metrics",
+    "recipes",
+    "comparisons"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "configuration": {
+      "type": "object",
+      "required": ["model", "prompt", "retriever", "scorer"]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["verified", "allow_unverified_adapter", "warnings"]
+    },
+    "retrieval_metrics": {"type": "object"},
+    "recipes": {"type": "object"},
+    "comparisons": {"type": "object"}
+  }
+}

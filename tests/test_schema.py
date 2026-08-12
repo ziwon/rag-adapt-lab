@@ -31,9 +31,9 @@ def test_eval_evidence_ids_are_merged() -> None:
 
 def test_machine_readable_manifest_schemas_match_runtime_versions() -> None:
     expected = {
-        "adapter-manifest-v2.schema.json": ADAPTER_MANIFEST_SCHEMA_VERSION,
-        "training-manifest-v2.schema.json": TRAINING_MANIFEST_SCHEMA_VERSION,
-        "benchmark-summary-v2.schema.json": BENCHMARK_SCHEMA_VERSION,
+        "adapter-manifest-v3.schema.json": ADAPTER_MANIFEST_SCHEMA_VERSION,
+        "training-manifest-v3.schema.json": TRAINING_MANIFEST_SCHEMA_VERSION,
+        "benchmark-summary-v3.schema.json": BENCHMARK_SCHEMA_VERSION,
     }
     for filename, version in expected.items():
         schema = json.loads(

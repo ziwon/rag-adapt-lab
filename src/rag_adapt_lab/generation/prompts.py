@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from typing import Any
 
 RAG_PROMPT_NAME = "rag-user-prompt"
-RAG_PROMPT_VERSION = "3"
+RAG_PROMPT_VERSION = "4"
 
 
 def format_rag_user_prompt(*, question: str, contexts: Sequence[str]) -> str:
@@ -32,9 +33,20 @@ def format_rag_user_prompt(*, question: str, contexts: Sequence[str]) -> str:
 
 def rag_prompt_provenance() -> dict[str, Any]:
     """Return a stable identity for the model-facing training/inference prompt."""
-    signature = format_rag_user_prompt(
-        question="__QUESTION__",
-        contexts=["__DOCUMENT_1__", "__DOCUMENT_2__"],
+    # Cover every rendering branch.  Hashing only the multi-document branch
+    # would let the SFT/no-document prompt change without changing provenance.
+    renderings = [
+        format_rag_user_prompt(question="__QUESTION__", contexts=contexts)
+        for contexts in (
+            [],
+            ["__DOCUMENT_1__"],
+            ["__DOCUMENT_1__", "__DOCUMENT_2__"],
+        )
+    ]
+    signature = json.dumps(
+        renderings,
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
     return {
         "name": RAG_PROMPT_NAME,

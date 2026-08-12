@@ -284,6 +284,32 @@ class BenchmarkRunner:
             if message not in self.provenance_warnings:
                 self.provenance_warnings.append(message)
 
+        if sft is not None and raft is not None and sft.verified and raft.verified:
+            mismatched_partitions = [
+                name
+                for name, sft_fingerprint, raft_fingerprint in (
+                    (
+                        "training",
+                        sft.training_source_fingerprint,
+                        raft.training_source_fingerprint,
+                    ),
+                    (
+                        "validation",
+                        sft.validation_source_fingerprint,
+                        raft.validation_source_fingerprint,
+                    ),
+                )
+                if sft_fingerprint != raft_fingerprint
+            ]
+            if mismatched_partitions:
+                message = (
+                    "SFT and RAFT conditions use different underlying source "
+                    f"partitions: {', '.join(mismatched_partitions)}"
+                )
+                if not self.allow_unverified_adapter:
+                    raise ValueError(message)
+                self.provenance_warnings.append(message)
+
         if self.provenance_warnings:
             for message in self.provenance_warnings:
                 warnings.warn(
@@ -475,14 +501,19 @@ class BenchmarkRunner:
     ) -> dict[str, Any]:
         comparisons: dict[str, Any] = {}
 
-        def has_numeric_metric(recipe: str, metric: str) -> bool:
+        def numeric_ids(recipe: str, metric: str) -> set[str]:
+            identifiers: set[str] = set()
             for row in rows_by_recipe[recipe]:
                 value = row.get(metric)
-                if value is None:
-                    value = row.get("scores", {}).get(metric)
+                scores = row.get("scores", {})
+                if value is None and isinstance(scores, Mapping):
+                    value = scores.get(metric)
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    return True
-            return False
+                    identifiers.add(str(row["id"]))
+            return identifiers
+
+        def has_numeric_pairs(baseline: str, candidate: str, metric: str) -> bool:
+            return bool(numeric_ids(baseline, metric) & numeric_ids(candidate, metric))
 
         for baseline, candidate in COMPARISON_PAIRS:
             if baseline not in rows_by_recipe or candidate not in rows_by_recipe:
@@ -491,7 +522,7 @@ class BenchmarkRunner:
             metrics = [
                 metric
                 for metric in ("exact_match", "token_f1")
-                if all(has_numeric_metric(name, metric) for name in (baseline, candidate))
+                if has_numeric_pairs(baseline, candidate, metric)
             ]
             for optional in (
                 "reference_overlap",
@@ -503,7 +534,7 @@ class BenchmarkRunner:
                 "citation_precision",
                 "citation_recall",
             ):
-                if all(has_numeric_metric(name, optional) for name in (baseline, candidate)):
+                if has_numeric_pairs(baseline, candidate, optional):
                     metrics.append(optional)
             comparisons[pair] = {
                 metric: paired_bootstrap_delta(

@@ -8,7 +8,12 @@ from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.evaluation.scorers import build_scorer
 from rag_adapt_lab.generation.base import GenerationResult, Generator
 from rag_adapt_lab.generation.prompts import rag_prompt_provenance
-from rag_adapt_lab.provenance import artifact_sha256, file_sha256
+from rag_adapt_lab.provenance import (
+    ADAPTER_MANIFEST_SCHEMA_VERSION,
+    BENCHMARK_SCHEMA_VERSION,
+    artifact_sha256,
+    file_sha256,
+)
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 
@@ -118,8 +123,8 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
     assert retriever.search_calls == len(examples)  # One shared retrieval pass.
     assert factory.created == [None, "sft-adapter", "raft-adapter"]
     assert set(summary["recipes"]) == {"base", "rag", "sft-rag", "raft-rag"}
-    assert summary["configuration"]["prompt"]["version"] == "3"
-    assert summary["schema_version"] == 2
+    assert summary["configuration"]["prompt"]["version"] == "4"
+    assert summary["schema_version"] == BENCHMARK_SCHEMA_VERSION
     assert summary["provenance"]["verified"] is False
     assert summary["retrieval_metrics"]["retrieval/evaluated"] == len(examples)
     assert "base->rag" in summary["comparisons"]
@@ -186,13 +191,15 @@ def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path
         )
         (adapter / "adapter_model.safetensors").write_bytes(b"identical-weights")
         manifest = {
-            "schema_version": 2,
+            "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
             "model": {"model_id": "test/model", "revision": "0" * 40},
             "adaptation_mode": mode,
             "training_prompt": rag_prompt_provenance(),
             "chat_template_kwargs": {},
             "training_dataset_fingerprint": "1" * 64,
             "validation_dataset_fingerprint": "2" * 64,
+            "training_source_fingerprint": "4" * 64,
+            "validation_source_fingerprint": "5" * 64,
             "held_out_evaluation_sha256": file_sha256(eval_path),
             "training_configuration_sha256": "3" * 64,
             "adapter_artifact_sha256": artifact_sha256(adapter),
@@ -209,6 +216,86 @@ def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path
         adapters={"sft-rag": adapters["sft"], "raft-rag": adapters["raft"]},
     )
     with pytest.raises(ValueError, match="same adapter artifact"):
+        BenchmarkRunner(
+            jobs=jobs,
+            model_config={
+                "model_id": "test/model",
+                "revision": "0" * 40,
+                "generation": {"max_new_tokens": 8, "do_sample": False},
+            },
+            documents=[Document(id="doc", text="doc")],
+            examples=[EvalExample(id="q", question="q", relevant_doc_ids=["doc"])],
+            retriever=StaticRetriever(),
+            retriever_config={"kind": "static"},
+            generator_factory=FakeGeneratorFactory(),
+            scorer=build_scorer(),
+            output_dir=tmp_path / "output",
+            top_k=1,
+            eval_path=eval_path,
+        )
+
+
+def test_comparisons_skip_optional_metrics_without_numeric_pairs() -> None:
+    runner = object.__new__(BenchmarkRunner)
+    runner.bootstrap_samples = 20
+    runner.seed = 7
+    comparisons = runner._comparisons(
+        {
+            "base": [
+                {"id": "a", "exact_match": 0.0, "token_f1": 0.0,
+                 "scores": {"judge_correctness": 0.2}},
+                {"id": "b", "exact_match": 0.0, "token_f1": 0.0, "scores": {}},
+            ],
+            "rag": [
+                {"id": "a", "exact_match": 1.0, "token_f1": 1.0, "scores": {}},
+                {"id": "b", "exact_match": 1.0, "token_f1": 1.0,
+                 "scores": {"judge_correctness": 0.8}},
+            ],
+        }
+    )
+    assert set(comparisons["base->rag"]) == {"exact_match", "token_f1"}
+
+
+def test_benchmark_rejects_mismatched_sft_and_raft_source_partitions(
+    tmp_path: Path,
+) -> None:
+    eval_path = tmp_path / "eval.jsonl"
+    eval_path.write_text('{"id":"q","question":"q"}\n', encoding="utf-8")
+    adapters: dict[str, Path] = {}
+    for mode, source_fingerprint in (("sft", "4" * 64), ("raft", "6" * 64)):
+        adapter = tmp_path / mode
+        adapter.mkdir()
+        (adapter / "adapter_config.json").write_text(
+            json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        )
+        (adapter / "adapter_model.safetensors").write_bytes(mode.encode())
+        manifest = {
+            "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
+            "model": {"model_id": "test/model", "revision": "0" * 40},
+            "adaptation_mode": mode,
+            "training_prompt": rag_prompt_provenance(),
+            "chat_template_kwargs": {},
+            "training_dataset_fingerprint": "1" * 64,
+            "validation_dataset_fingerprint": "2" * 64,
+            "training_source_fingerprint": source_fingerprint,
+            "validation_source_fingerprint": "5" * 64,
+            "held_out_evaluation_sha256": file_sha256(eval_path),
+            "training_configuration_sha256": "3" * 64,
+            "adapter_artifact_sha256": artifact_sha256(adapter),
+        }
+        (adapter / "raglab_adapter_manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        adapters[mode] = adapter
+
+    jobs = build_plan(
+        recipes=["sft-rag", "raft-rag"],
+        model_config="model.yaml",
+        documents="documents.jsonl",
+        eval_set="eval.jsonl",
+        adapters={"sft-rag": adapters["sft"], "raft-rag": adapters["raft"]},
+    )
+    with pytest.raises(ValueError, match="different underlying source partitions"):
         BenchmarkRunner(
             jobs=jobs,
             model_config={

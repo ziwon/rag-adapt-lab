@@ -104,6 +104,8 @@ def test_real_cpu_dependency_contracts(tmp_path: Path) -> None:
         "chat_template_kwargs": {},
         "training_dataset_fingerprint": "1" * 64,
         "validation_dataset_fingerprint": "2" * 64,
+        "training_source_fingerprint": "4" * 64,
+        "validation_source_fingerprint": "5" * 64,
         "held_out_evaluation_sha256": file_sha256(evaluation),
         "training_configuration_sha256": "3" * 64,
         "adapter_artifact_sha256": artifact_sha256(adapter),

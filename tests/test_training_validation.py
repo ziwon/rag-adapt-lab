@@ -9,7 +9,10 @@ from rag_adapt_lab.training.data import (
     render_chat_prompt_completions,
 )
 from rag_adapt_lab.training.qlora import _load_training_split as load_training_split
-from rag_adapt_lab.training.qlora import build_sft_config_values
+from rag_adapt_lab.training.qlora import (
+    build_sft_config_values,
+    require_verifiable_training_prompt,
+)
 
 
 def rows(count: int = 10) -> list[dict[str, str]]:
@@ -149,3 +152,55 @@ def test_validation_requires_an_evaluation_schedule() -> None:
             report_to_wandb=False,
             has_validation=True,
         )
+
+
+def test_verifiable_training_requires_the_inference_chat_template() -> None:
+    with pytest.raises(ValueError, match="use_chat_template=true"):
+        require_verifiable_training_prompt({"use_chat_template": False})
+    require_verifiable_training_prompt({"use_chat_template": True})
+
+
+def test_explicit_validation_enforces_custom_group_fields(tmp_path: Path) -> None:
+    train_path = tmp_path / "train.jsonl"
+    validation_path = tmp_path / "validation.jsonl"
+    train_path.write_text(
+        '{"id":"train","question":"train q","answer":"a",'
+        '"metadata":{"thread":"shared"}}\n',
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        '{"id":"validation","question":"validation q","answer":"a",'
+        '"metadata":{"thread":"shared"}}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="configured grouping values"):
+        load_training_split(
+            train_file=train_path,
+            validation_file=validation_path,
+            held_out_eval_file=None,
+            validation_ratio=0.1,
+            seed=42,
+            split_config={"strategy": "grouped", "group_by": ["metadata.thread"]},
+        )
+
+
+def test_nested_split_ratio_and_seed_override_legacy_top_level_values(tmp_path: Path) -> None:
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        "".join(
+            f'{{"id":"row-{index}","question":"q {index}","answer":"a"}}\n'
+            for index in range(10)
+        ),
+        encoding="utf-8",
+    )
+    split = load_training_split(
+        train_file=train_path,
+        validation_file=None,
+        held_out_eval_file=None,
+        validation_ratio=0.1,
+        seed=1,
+        split_config={"validation_ratio": 0.3, "seed": 99},
+    )
+    assert split.validation_ratio == 0.3
+    assert split.seed == 99
+    assert len(split.validation_rows) == 3

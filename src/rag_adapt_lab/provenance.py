@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 ADAPTER_MANIFEST_FILENAME = "raglab_adapter_manifest.json"
-ADAPTER_MANIFEST_SCHEMA_VERSION = 2
-TRAINING_MANIFEST_SCHEMA_VERSION = 2
-BENCHMARK_SCHEMA_VERSION = 2
+ADAPTER_MANIFEST_SCHEMA_VERSION = 3
+TRAINING_MANIFEST_SCHEMA_VERSION = 3
+BENCHMARK_SCHEMA_VERSION = 3
 
 AdaptationMode = Literal["sft", "raft"]
 _SHA256_HEX_LENGTH = 64
@@ -65,6 +65,8 @@ class AdapterVerification:
     verified: bool
     artifact_sha256: str | None
     adaptation_mode: str | None
+    training_source_fingerprint: str | None = None
+    validation_source_fingerprint: str | None = None
     warnings: tuple[str, ...] = ()
     manifest: Mapping[str, Any] | None = None
 
@@ -74,6 +76,8 @@ class AdapterVerification:
             "verified": self.verified,
             "artifact_sha256": self.artifact_sha256,
             "adaptation_mode": self.adaptation_mode,
+            "training_source_fingerprint": self.training_source_fingerprint,
+            "validation_source_fingerprint": self.validation_source_fingerprint,
             "warnings": list(self.warnings),
             "manifest_schema_version": (
                 self.manifest.get("schema_version") if self.manifest is not None else None
@@ -147,6 +151,8 @@ def _verify_adapter_manifest(
     for field in (
         "training_dataset_fingerprint",
         "validation_dataset_fingerprint",
+        "training_source_fingerprint",
+        "validation_source_fingerprint",
         "held_out_evaluation_sha256",
         "training_configuration_sha256",
         "adapter_artifact_sha256",
@@ -180,6 +186,8 @@ def _verify_adapter_manifest(
         verified=True,
         artifact_sha256=computed_artifact_hash,
         adaptation_mode=mode,
+        training_source_fingerprint=manifest["training_source_fingerprint"],
+        validation_source_fingerprint=manifest["validation_source_fingerprint"],
         manifest=manifest,
     )
 
@@ -200,7 +208,13 @@ def validate_adapter_provenance(
         message = f"Adapter path does not exist: {adapter}"
         if not allow_unverified:
             raise FileNotFoundError(message)
-        return AdapterVerification(str(adapter), False, None, None, (message,))
+        return AdapterVerification(
+            str(adapter),
+            False,
+            None,
+            None,
+            warnings=(message,),
+        )
 
     peft_config_path = adapter / "adapter_config.json"
     if peft_config_path.is_file():
