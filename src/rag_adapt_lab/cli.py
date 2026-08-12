@@ -13,7 +13,11 @@ from rag_adapt_lab.config import (
     validate_hf_model_config,
 )
 from rag_adapt_lab.data.io import load_documents, load_eval, load_qa_examples, write_jsonl
-from rag_adapt_lab.data.raft import build_raft_examples, build_raft_partitions
+from rag_adapt_lab.data.raft import (
+    build_raft_examples,
+    build_raft_partitions,
+    validate_distinct_output_paths,
+)
 from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.evaluation.scorers import build_scorer
@@ -88,6 +92,16 @@ def prepare_raft(
     corpus_policy: str = typer.Option("shared-corpus", "--corpus-policy"),
     manifest_output: Path | None = typer.Option(None, "--manifest-output"),
 ) -> None:
+    resolved_manifest = manifest_output or output.with_suffix(output.suffix + ".manifest.json")
+    if validation_output is not None:
+        try:
+            validate_distinct_output_paths(
+                output,
+                validation_output,
+                resolved_manifest,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--output") from exc
     training_examples = load_qa_examples(training_set)
     try:
         ensure_disjoint_qa_splits(training_examples, load_eval(held_out_eval))
@@ -149,7 +163,6 @@ def prepare_raft(
         raise typer.BadParameter(str(exc), param_hint="--split-config") from exc
     write_jsonl(output, partitions.train_rows)
     write_jsonl(validation_output, partitions.validation_rows)
-    resolved_manifest = manifest_output or output.with_suffix(output.suffix + ".manifest.json")
     resolved_manifest.parent.mkdir(parents=True, exist_ok=True)
     resolved_manifest.write_text(
         json.dumps(partitions.manifest, indent=2) + "\n",

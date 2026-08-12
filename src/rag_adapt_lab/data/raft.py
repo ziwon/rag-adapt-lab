@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from rag_adapt_lab.retrieval.base import Retriever
@@ -12,6 +13,27 @@ from .schema import Document, EvalExample, RAFTContext, RAFTExample
 from .splitting import CorpusPolicy, SplitStrategy, partition_audit, split_rows
 
 NegativeStrategy = Literal["random", "bm25-hard-negative"]
+
+
+def validate_distinct_output_paths(
+    output: Path,
+    validation_output: Path,
+    manifest_output: Path,
+) -> None:
+    """Reject RAFT destinations that would overwrite one another."""
+    targets = {
+        "--output": output.resolve(),
+        "--validation-output": validation_output.resolve(),
+        "--manifest-output": manifest_output.resolve(),
+    }
+    duplicates = [
+        f"{left} and {right}"
+        for index, (left, left_path) in enumerate(targets.items())
+        for right, right_path in list(targets.items())[index + 1 :]
+        if left_path == right_path
+    ]
+    if duplicates:
+        raise ValueError("RAFT output paths must be distinct: " + ", ".join(duplicates))
 
 
 @dataclass(frozen=True, slots=True)
