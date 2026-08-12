@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rag-adapt-lab"
-version = "0.1.0"
+version = "0.2.0"
 description = "Domain-neutral RAG vs SFT vs RAFT experiment harness with W&B Models and Weave integration"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"

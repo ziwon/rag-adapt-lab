@@ -186,7 +186,7 @@ def eval_retrieval(
     examples = load_eval(eval_set)
     if retriever != "bm25":
         raise typer.BadParameter(
-            "The CLI v0.1 wires BM25 directly. Dense/hybrid are extension backends."
+            "The CLI wires BM25 directly. Dense/hybrid are extension backends."
         )
     backend = BM25Retriever()
     backend.index(docs)

@@ -445,7 +445,7 @@ Current limitations:
 Passing only the unit job is not described as full validation. See
 [schema-v3 migration notes](docs/migration_v3.md) for matched adaptation populations, prompt provenance, and judge-cache changes. The historical [schema-v2 notes](docs/migration_v2.md) remain available.
 
-Out of scope for v0.1:
+Out of scope for v0.2:
 
 - full-parameter fine-tuning
 - RLHF/RL

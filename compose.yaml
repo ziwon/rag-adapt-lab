@@ -19,7 +19,7 @@ x-lab-environment: &lab-environment
   S3_BUCKET: ${S3_BUCKET:-rag-adapt-lab}
 
 x-lab-service: &lab-service
-  image: ${RAGLAB_IMAGE:-rag-adapt-lab:0.1.0-local}
+  image: ${RAGLAB_IMAGE:-rag-adapt-lab:0.2.0-local}
   build:
     context: .
     dockerfile: docker/Dockerfile
