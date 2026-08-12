@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from rag_adapt_lab.evaluation.scorers import (
     LexicalGroundednessScorer,
     LLMJudgeScorer,
     NoOpScorer,
+    OpenAICompatibleJudgeBackend,
     _parse_json_object,
 )
 
@@ -87,6 +89,65 @@ def test_callable_judge_backend_is_pluggable_versioned_and_cached() -> None:
     assert calls == 1
     assert scorer.metadata()["version"] == "rag-judge-v2"
     assert scorer.metadata()["backend"]["revision"] == "0" * 40
+
+
+def test_persistent_judge_cache_is_transactional_sqlite(tmp_path) -> None:
+    calls = 0
+
+    def judge(prompt: str) -> dict[str, float | str]:
+        nonlocal calls
+        calls += 1
+        return valid_judgment()
+
+    cache_path = tmp_path / "judge-cache.sqlite3"
+    first = LLMJudgeScorer(
+        CallableJudgeBackend(judge, model_name="persistent"),
+        cache_path=cache_path,
+    )
+    assert score(first)["judge_cache_hit"] is False
+    second = LLMJudgeScorer(
+        CallableJudgeBackend(judge, model_name="persistent"),
+        cache_path=cache_path,
+    )
+    assert score(second)["judge_cache_hit"] is True
+    assert calls == 1
+    assert cache_path.read_bytes().startswith(b"SQLite format 3\x00")
+
+
+def test_openai_judge_streams_with_server_and_client_response_bounds() -> None:
+    captured: dict[str, object] = {}
+    payload = json.dumps(valid_judgment())
+
+    class Stream:
+        def __iter__(self):
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=payload))]
+            )
+
+        def close(self) -> None:
+            captured["closed"] = True
+
+    class Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return Stream()
+
+    backend = object.__new__(OpenAICompatibleJudgeBackend)
+    backend.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+    backend.model = "judge"
+    backend.max_completion_tokens = 123
+    backend.max_rationale_characters = 77
+    backend.max_response_bytes = 1_024
+    backend.structured_output = True
+    result = backend.evaluate("evaluate")
+    assert result["correctness"] == 0.9
+    assert captured["stream"] is True
+    assert captured["max_completion_tokens"] == 123
+    response_schema = captured["response_format"]["json_schema"]["schema"]
+    assert response_schema["properties"]["rationale"]["maxLength"] == 77
+    assert captured["closed"] is True
 
 
 def test_judge_timeout_retries_and_isolates_failure() -> None:

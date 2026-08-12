@@ -15,7 +15,9 @@ judge:
   max_retries: 2
   retry_backoff_seconds: 0.5
   max_response_bytes: 32768
+  max_completion_tokens: 256
+  max_rationale_characters: 1000
   cache: true
-  cache_path: .cache/raglab/judge-cache.json
+  cache_path: .cache/raglab/judge-cache.sqlite3
   concurrency_limit: 1
   structured_output: true

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -264,6 +265,8 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
         connection_timeout_seconds: float = 10.0,
         read_timeout_seconds: float = 30.0,
         max_response_bytes: int = 32_768,
+        max_completion_tokens: int = 256,
+        max_rationale_characters: int = 1_000,
         structured_output: bool = True,
     ) -> None:
         try:
@@ -275,6 +278,10 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
             raise ValueError("Judge connection/read timeouts must be positive")
         if max_response_bytes < 128:
             raise ValueError("Judge max_response_bytes must be at least 128")
+        if max_completion_tokens < 1:
+            raise ValueError("Judge max_completion_tokens must be positive")
+        if max_rationale_characters < 1:
+            raise ValueError("Judge max_rationale_characters must be positive")
         timeout = httpx.Timeout(
             timeout=read_timeout_seconds,
             connect=connection_timeout_seconds,
@@ -287,6 +294,8 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
         self.connection_timeout_seconds = connection_timeout_seconds
         self.read_timeout_seconds = read_timeout_seconds
         self.max_response_bytes = max_response_bytes
+        self.max_completion_tokens = max_completion_tokens
+        self.max_rationale_characters = max_rationale_characters
         self.structured_output = structured_output
 
     def evaluate(
@@ -302,6 +311,8 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0,
+            "max_completion_tokens": self.max_completion_tokens,
+            "stream": True,
         }
         if self.structured_output:
             request["response_format"] = {
@@ -326,17 +337,31 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
                                 "minimum": 0,
                                 "maximum": 1,
                             },
-                            "rationale": {"type": "string"},
+                            "rationale": {
+                                "type": "string",
+                                "maxLength": self.max_rationale_characters,
+                            },
                         },
                     },
                 },
             }
-        response = self.client.chat.completions.create(
-            **request,
-        )
-        content = response.choices[0].message.content or ""
-        if len(content.encode("utf-8")) > self.max_response_bytes:
-            raise ValueError("Judge response exceeded max_response_bytes")
+        response = self.client.chat.completions.create(**request)
+        fragments: list[str] = []
+        response_bytes = 0
+        try:
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                fragment = chunk.choices[0].delta.content or ""
+                response_bytes += len(fragment.encode("utf-8"))
+                if response_bytes > self.max_response_bytes:
+                    raise ValueError("Judge response exceeded max_response_bytes")
+                fragments.append(fragment)
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+        content = "".join(fragments)
         return _parse_json_object(content)
 
     def metadata(self) -> dict[str, Any]:
@@ -350,6 +375,9 @@ class OpenAICompatibleJudgeBackend(JudgeBackend):
             "connection_timeout_seconds": self.connection_timeout_seconds,
             "read_timeout_seconds": self.read_timeout_seconds,
             "max_response_bytes": self.max_response_bytes,
+            "max_completion_tokens": self.max_completion_tokens,
+            "max_rationale_characters": self.max_rationale_characters,
+            "stream_response": True,
             "structured_output": self.structured_output,
         }
 
@@ -365,45 +393,79 @@ claims not supported by those contexts."""
 
 
 class DeterministicJudgeCache:
-    """Thread-safe cache keyed only by versioned judge inputs and configuration."""
+    """Thread/process-safe cache keyed by versioned judge inputs and configuration."""
 
     def __init__(self, *, enabled: bool, path: str | Path | None = None) -> None:
         self.enabled = enabled
         self.path = Path(path) if path is not None else None
         self._values: dict[str, dict[str, ScoreValue]] = {}
-        self._lock = threading.Lock()
-        if self.enabled and self.path is not None and self.path.is_file():
-            try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    self._values = {
-                        str(key): dict(value)
-                        for key, value in loaded.items()
-                        if isinstance(value, Mapping)
-                    }
-            except (json.JSONDecodeError, OSError):
-                self._values = {}
+        self._lock = threading.RLock()
+        if self.enabled and self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.is_file() and self.path.stat().st_size:
+                with self.path.open("rb") as stream:
+                    header = stream.read(16)
+                if header != b"SQLite format 3\x00":
+                    raise ValueError(
+                        f"Judge cache {self.path} is not SQLite; configure a new .sqlite3 "
+                        "cache path instead of reusing a legacy JSON cache"
+                    )
+            with self._connect() as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS judge_cache ("
+                    "cache_key TEXT PRIMARY KEY, value_json TEXT NOT NULL)"
+                )
+
+    def _connect(self) -> sqlite3.Connection:
+        if self.path is None:
+            raise RuntimeError("Persistent judge cache has no path")
+        return sqlite3.connect(self.path, timeout=30.0)
 
     def get(self, key: str) -> dict[str, ScoreValue] | None:
         if not self.enabled:
             return None
         with self._lock:
-            value = self._values.get(key)
-            return dict(value) if value is not None else None
+            if self.path is None:
+                value = self._values.get(key)
+                return dict(value) if value is not None else None
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM judge_cache WHERE cache_key = ?", (key,)
+                ).fetchone()
+            if row is None:
+                return None
+            try:
+                value = json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                self.delete(key)
+                return None
+            return dict(value) if isinstance(value, Mapping) else None
 
     def put(self, key: str, value: Mapping[str, ScoreValue]) -> None:
         if not self.enabled:
             return
         with self._lock:
-            self._values[key] = dict(value)
-            if self.path is not None:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-                temporary.write_text(
-                    json.dumps(self._values, ensure_ascii=False, sort_keys=True) + "\n",
-                    encoding="utf-8",
+            if self.path is None:
+                self._values[key] = dict(value)
+                return
+            payload = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO judge_cache(cache_key, value_json) VALUES (?, ?) "
+                    "ON CONFLICT(cache_key) DO UPDATE SET value_json=excluded.value_json",
+                    (key, payload),
                 )
-                temporary.replace(self.path)
+
+    def delete(self, key: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            if self.path is None:
+                self._values.pop(key, None)
+                return
+            with self._connect() as connection:
+                connection.execute("DELETE FROM judge_cache WHERE cache_key = ?", (key,))
 
 
 def _judge_error_type(exc: Exception) -> str:
@@ -486,6 +548,16 @@ class LLMJudgeScorer(Scorer):
             output["judge_rationale"] = str(judged["rationale"])
         return output
 
+    def _validate_cached_judgment(self, cached: Mapping[str, Any]) -> ScoreResult:
+        source = {
+            "correctness": cached.get("judge_correctness"),
+            "groundedness": cached.get("judge_groundedness"),
+            "unsupported_claim_rate": cached.get("judge_unsupported_claim_rate"),
+        }
+        if "judge_rationale" in cached:
+            source["rationale"] = cached["judge_rationale"]
+        return self._validate_judgment(source)
+
     def score(
         self,
         *,
@@ -542,13 +614,18 @@ class LLMJudgeScorer(Scorer):
         started = time.perf_counter()
         cached = self.cache.get(key)
         if cached is not None:
-            return {
-                **cached,
-                "judge_status": "ok",
-                "judge_attempts": 0,
-                "judge_cache_hit": True,
-                "judge_latency_s": time.perf_counter() - started,
-            }
+            try:
+                cached_output = self._validate_cached_judgment(cached)
+            except ValueError:
+                self.cache.delete(key)
+            else:
+                return {
+                    **cached_output,
+                    "judge_status": "ok",
+                    "judge_attempts": 0,
+                    "judge_cache_hit": True,
+                    "judge_latency_s": time.perf_counter() - started,
+                }
 
         last_error: Exception | None = None
         attempts = self.max_retries + 1
@@ -661,10 +738,12 @@ def build_scorer(config: Mapping[str, Any] | None = None) -> Scorer:
             ),
             read_timeout_seconds=float(judge.get("read_timeout_seconds", timeout_seconds)),
             max_response_bytes=int(judge.get("max_response_bytes", 32_768)),
+            max_completion_tokens=int(judge.get("max_completion_tokens", 256)),
+            max_rationale_characters=int(judge.get("max_rationale_characters", 1_000)),
             structured_output=bool(judge.get("structured_output", True)),
         )
         cache_enabled = bool(judge.get("cache", True))
-        cache_path = judge.get("cache_path", ".cache/raglab/judge-cache.json")
+        cache_path = judge.get("cache_path", ".cache/raglab/judge-cache.sqlite3")
         scorers.append(
             LLMJudgeScorer(
                 backend,
