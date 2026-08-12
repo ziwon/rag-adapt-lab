@@ -106,7 +106,7 @@ TRAIN_RECIPE=configs/recipes/hf-squad-raft-smoke.yaml \
 docker compose --env-file .env.compose run --rm benchmark
 ```
 
-The preparation job splits before hard-negative mining and emits matched SFT/RAFT train and validation files. The `train` service passes validation explicitly and uses the held-out evaluation file only for leakage/provenance checks. The benchmark fails closed on incompatible adapter manifests and writes schema-v2 `summary.json`, `report.md`, and per-recipe predictions. Its tracker defaults to `none`; set `BENCHMARK_TRACKING_BACKEND=wandb` to log metrics and artifacts. The older `evaluate` job remains a focused Base-vs-adapter/oracle diagnostic, not the canonical four-recipe result.
+The preparation job splits before hard-negative mining and emits matched SFT/RAFT train and validation files. The `train` service passes validation explicitly and uses the held-out evaluation file only for leakage/provenance checks. The benchmark fails closed on incompatible adapter manifests and writes schema-v3 `summary.json`, `report.md`, and per-recipe predictions. Its tracker defaults to `none`; set `BENCHMARK_TRACKING_BACKEND=wandb` to log metrics and artifacts. The older `evaluate` job remains a focused Base-vs-adapter/oracle diagnostic, not the canonical four-recipe result.
 
 Verify W&B Models logging and a Weave trace after configuring the API key and licenses:
 

@@ -108,7 +108,7 @@ The labeled RAFT source uses the same schema as `eval.jsonl`, but it must be a d
 {"id":"sft-001","input":"Question...","output":"Expected answer..."}
 ```
 
-The legacy `instruction` field remains accepted as data metadata, but schema v2 deliberately does not render per-row instruction variants: SFT must use the same benchmark prompt contract with an empty document list. If no explicit SFT file is available, derive it from the same pre-split labeled QA source used for RAFT.
+The legacy `instruction` field remains accepted as data metadata, but schema v3 deliberately does not render per-row instruction variants: SFT must use the same benchmark prompt contract with an empty document list. If no explicit SFT file is available, derive it from the same pre-split labeled QA source used for RAFT.
 
 ## Quick start
 
@@ -209,7 +209,7 @@ raglab train \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
-Training configs default to a deterministic group-aware validation split. Supplying the partition produced before RAFT mining with `--validation-file` is preferred. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v2 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash.
+Training configs default to a deterministic group-aware validation split. Supplying the partition produced before RAFT mining with `--validation-file` is preferred. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v3 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, representation-independent source-partition fingerprints, full dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash. When both adapted conditions are benchmarked, their source-partition fingerprints must match.
 
 SFT and RAFT use exactly the same versioned `rag-user-prompt` builder. SFT supplies no documents; RAFT supplies positive evidence and distractors. For TRL 0.24.0, the tokenizer chat template is explicitly rendered with the model's effective kwargs before creating plain prompt/completion records. `completion_only_loss: true` therefore masks the entire prompt (including retrieved documents), leaving only assistant completion tokens as targets. Oracle relevance flags are excluded.
 
@@ -431,7 +431,7 @@ Current limitations:
 - citation scoring recognizes explicit `[Document N]` references only and is disabled by default;
 - the stock trainer selects from metrics emitted by TRL/Transformers (normally `eval_loss`); custom task metrics require extending the trainer;
 - confidence intervals are unadjusted for multiple comparisons.
-- the stock answer-only trainer fails closed for thinking-enabled adapter training; thinking-enabled base/RAG inference and externally trained schema-v2 adapters remain evaluable as separate conditions;
+- the stock answer-only trainer fails closed for thinking-enabled adapter training; thinking-enabled base/RAG inference and externally trained schema-v3 adapters remain evaluable as separate conditions;
 - the GPU workflow requires a compatible self-hosted runner and is not evidence that a particular local checkout has executed CUDA unless that job result is available;
 
 ## Validation layers
@@ -441,7 +441,7 @@ Current limitations:
 - **GPU integration:** scheduled/manual self-hosted workflow that constructs a local tiny model, trains distinct SFT/RAFT LoRA adapters, reloads them, generates, captures CUDA memory, and executes one benchmark matrix.
 
 Passing only the unit job is not described as full validation. See
-[schema-v2 migration notes](docs/migration_v2.md) for stricter adapter behavior and renamed metrics.
+[schema-v3 migration notes](docs/migration_v3.md) for matched adaptation populations, prompt provenance, and judge-cache changes. The historical [schema-v2 notes](docs/migration_v2.md) remain available.
 
 Out of scope for v0.1:
 

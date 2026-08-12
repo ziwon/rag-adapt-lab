@@ -47,9 +47,9 @@ Generation is an interface. The local runner validates the explicit chat-templat
 
 The QLoRA trainer uses pinned TRL + PEFT + bitsandbytes and accepts ordinary SFT or RAFT records. Group-aware splitting operates on connected grouping keys and supports shared-corpus and document-disjoint policies. RAFT can split raw labeled QA before independently mining each partition. Both partitions are checked against a mandatory held-out benchmark file before a verifiable adapter is produced.
 
-Both training modes use prompt v3: SFT passes an empty context list and RAFT passes evidence plus distractors. Because TRL 0.24.0 does not accept chat-template kwargs in `SFTConfig`, the tokenizer template is explicitly rendered first with the recorded kwargs, then passed to TRL as plain prompt/completion text with completion-only loss.
+Both training modes use prompt v4: SFT passes an empty context list and RAFT passes evidence plus distractors. The provenance hash covers the empty-, one-, and multi-document rendering branches. Because TRL 0.24.0 does not accept chat-template kwargs in `SFTConfig`, the tokenizer template is explicitly rendered first with the recorded kwargs, then passed to TRL as plain prompt/completion text with completion-only loss. Verifiable training therefore requires `use_chat_template: true`.
 
-Training and adapter manifests use schema v2. The benchmark recomputes adapter artifact hashes and validates model revision, adaptation mode, prompt identity/hash, chat-template args, and the exact held-out evaluation hash. Missing or incompatible manifests fail closed unless a visibly recorded legacy override is enabled.
+Training and adapter manifests use schema v3. The benchmark recomputes adapter artifact hashes and validates model revision, adaptation mode, prompt identity/hash, chat-template args, the exact held-out evaluation hash, and matched source-partition fingerprints for SFT versus RAFT. Missing or incompatible manifests fail closed unless a visibly recorded legacy override is enabled.
 
 ### Evaluation
 
