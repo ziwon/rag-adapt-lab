@@ -108,7 +108,7 @@ The labeled RAFT source uses the same schema as `eval.jsonl`, but it must be a d
 {"id":"sft-001","input":"Question...","output":"Expected answer..."}
 ```
 
-The legacy `instruction` field remains accepted as data metadata, but schema v3 deliberately does not render per-row instruction variants: SFT must use the same benchmark prompt contract with an empty document list. If no explicit SFT file is available, derive it from the same pre-split labeled QA source used for RAFT.
+The legacy `instruction` field remains accepted as data metadata, but the verifiable training contract deliberately does not render per-row instruction variants: SFT must use the same benchmark prompt contract with an empty document list. For a canonical SFT-versus-RAFT comparison, derive SFT from the same pre-split labeled QA source and partitions used for RAFT; the standalone demo file is suitable only for SFT-only experiments.
 
 ## Quick start
 
@@ -177,7 +177,7 @@ raglab prepare-raft \
   --seed 42
 ```
 
-`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. With `--validation-output`, raw QA is group-split first and separate retrievers mine each partition. `shared-corpus` permits document reuse while keeping questions disjoint; `document-disjoint` partitions positives and distractor pools so no document crosses the boundary. The emitted manifest records group counts, fingerprints, overlap counts, corpus policy, mining scope, and seed. Relevance labels remain metadata and are never rendered into the prompt.
+`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. With `--validation-output`, raw QA is group-split first and separate retrievers mine each partition. `shared-corpus` permits document reuse while keeping questions disjoint; `document-disjoint` partitions positives and distractor pools so no document crosses the boundary. The emitted manifest records group counts, fingerprints, overlap counts, corpus policy, mining scope, and seed. Relevance labels remain metadata and are never rendered into the prompt. `--output`, `--validation-output`, and the default or explicit `--manifest-output` must resolve to three distinct paths.
 
 ### 5. Run retrieval evaluation
 
@@ -194,8 +194,8 @@ raglab eval-retrieval \
 ```bash
 raglab train \
   --config configs/recipes/sft-rag.yaml \
-  --train-file examples/demo/sft.jsonl \
-  --validation-file data/sft_validation.jsonl \
+  --train-file data/raft_train.jsonl \
+  --validation-file data/raft_validation.jsonl \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
@@ -209,7 +209,7 @@ raglab train \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
-Training configs default to a deterministic group-aware validation split. Supplying the partition produced before RAFT mining with `--validation-file` is preferred. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v3 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, representation-independent source-partition fingerprints, full dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash. When both adapted conditions are benchmarked, their source-partition fingerprints must match.
+The SFT recipe above intentionally consumes the same mined rows as RAFT: SFT mode uses their IDs, questions, and answers while ignoring contexts, which preserves matched source partitions. Training configs default to a deterministic group-aware validation split. Supplying the explicit matched partitions emitted by `prepare-raft` with `--validation-file` is preferred. Within a training config, `split.validation_ratio` and `split.seed` take precedence over the legacy top-level `validation_split_ratio` and `seed`; explicit train/validation files are still checked against every configured grouping field. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v3 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, representation-independent source-partition fingerprints, full dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash. When both adapted conditions are benchmarked, their source-partition fingerprints must match.
 
 SFT and RAFT use exactly the same versioned `rag-user-prompt` builder. SFT supplies no documents; RAFT supplies positive evidence and distractors. For TRL 0.24.0, the tokenizer chat template is explicitly rendered with the model's effective kwargs before creating plain prompt/completion records. `completion_only_loss: true` therefore masks the entire prompt (including retrieved documents), leaving only assistant completion tokens as targets. Oracle relevance flags are excluded.
 
@@ -236,8 +236,10 @@ The runner builds the retrieval index once, caches one ranking per evaluation ex
 
 Adapter validation fails closed. SFT and RAFT manifests must declare the expected mode and match
 the benchmark model revision, prompt contract, chat-template args, and current held-out file hash;
-their recorded artifact hashes are recomputed, and identical SFT/RAFT artifacts are rejected. A
-legacy adapter can be run only with `--allow-unverified-adapter`; the CLI emits a warning and both
+their recorded artifact hashes are recomputed, identical artifacts are rejected, and their
+training and validation source fingerprints—derived from source IDs, normalized questions, and
+target answers—must match. A legacy adapter can be run only with `--allow-unverified-adapter`; the
+CLI emits a warning and both
 `summary.json` and `report.md` label the experiment as unverified.
 
 Outputs include:
@@ -255,7 +257,7 @@ cp configs/scorers/openai-compatible.example.yaml configs/scorers/local-judge.ya
 export JUDGE_API_KEY=local
 ```
 
-The judge treats the answer and retrieved text as untrusted serialized data under a separate system rubric. Connect/read timeouts, bounded retry/backoff, response-size limits, structured output, concurrency, deterministic cache, and strict/non-strict behavior are configurable. Non-strict failures are isolated per example and never remove EM/F1; reports include judge coverage and failure rate. The Python API also accepts `CallableJudgeBackend`. Set `mode: disabled` to disable plugin scores while retaining EM/F1.
+The judge treats the answer and retrieved text as untrusted serialized data under a separate system rubric. Connect/read timeouts, bounded retry/backoff, streamed `max_response_bytes` enforcement, server-side `max_completion_tokens`, structured-output `max_rationale_characters`, concurrency, and strict/non-strict behavior are configurable. The persistent deterministic cache uses transactional SQLite and defaults to `.cache/raglab/judge-cache.sqlite3`; choose a new path rather than reusing a legacy JSON cache. Non-strict failures are isolated per example and never remove EM/F1; optional comparison metrics are calculated only where both recipes have numeric scores for the same example IDs. Reports include judge coverage and failure rate. The Python API also accepts `CallableJudgeBackend`. Set `mode: disabled` to disable plugin scores while retaining EM/F1.
 
 ### Public Hugging Face smoke experiment
 
