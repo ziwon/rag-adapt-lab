@@ -122,3 +122,23 @@ def validate_thinking_configuration(config: Mapping[str, Any]) -> bool:
                 "systematically truncated"
             )
     return thinking_enabled
+
+
+def effective_generation_config(
+    config: Mapping[str, Any],
+    *,
+    max_new_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Return generation settings after validating any CLI token override."""
+    raw = config.get("generation", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("generation must be a mapping")
+    generation = dict(raw)
+    if max_new_tokens is not None:
+        generation["max_new_tokens"] = max_new_tokens
+    generation.setdefault("max_new_tokens", 64)
+    generation.setdefault("do_sample", False)
+    effective = dict(config)
+    effective["generation"] = generation
+    validate_thinking_configuration(effective)
+    return generation

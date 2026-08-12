@@ -14,6 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rag_adapt_lab.config import (
     effective_chat_template_kwargs,
+    effective_generation_config,
     load_yaml,
     validate_hf_model_config,
     validate_thinking_configuration,
@@ -24,7 +25,11 @@ from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.evaluation.statistics import paired_bootstrap_delta
 from rag_adapt_lab.generation.prompts import format_rag_user_prompt, rag_prompt_provenance
 from rag_adapt_lab.generation.transformers import parse_thinking_output
-from rag_adapt_lab.provenance import file_sha256, validate_adapter_provenance
+from rag_adapt_lab.provenance import (
+    BENCHMARK_SCHEMA_VERSION,
+    file_sha256,
+    validate_adapter_provenance,
+)
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
 
 
@@ -38,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -50,6 +56,9 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, float | int]:
         "model_generate_latency_s_per_example": statistics.fmean(
             row["model_generate_latency_s"] for row in rows
         ),
+        "output_tokens": sum(row["output_tokens"] for row in rows),
+        "reasoning_tokens": sum(row["reasoning_tokens"] for row in rows),
+        "answer_tokens": sum(row["answer_tokens"] for row in rows),
     }
 
 
@@ -80,9 +89,10 @@ def run_generation(
     condition: str,
     label: str,
     batch_size: int,
-    max_new_tokens: int,
+    generation_config: dict[str, Any],
     chat_template_kwargs: dict[str, Any],
     thinking_enabled: bool,
+    seed: int,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for start in range(0, len(prepared), batch_size):
@@ -97,13 +107,15 @@ def run_generation(
             for row in batch
         ]
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+        batch_index = start // batch_size
+        torch.manual_seed(seed + batch_index)
+        torch.cuda.manual_seed_all(seed + batch_index)
         torch.cuda.synchronize()
         started = time.perf_counter()
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
+                **generation_config,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
@@ -119,6 +131,15 @@ def run_generation(
             )
             references = row["references"]
             normalized_prediction = normalize_text(prediction)
+            output_tokens = len(
+                tokenizer(raw_prediction, add_special_tokens=False)["input_ids"]
+            )
+            reasoning_tokens = (
+                len(tokenizer(reasoning, add_special_tokens=False)["input_ids"])
+                if reasoning is not None
+                else 0
+            )
+            answer_tokens = len(tokenizer(prediction, add_special_tokens=False)["input_ids"])
             results.append(
                 {
                     "id": row["id"],
@@ -130,6 +151,9 @@ def run_generation(
                     "prediction": prediction,
                     "raw_prediction": raw_prediction,
                     "reasoning": reasoning,
+                    "output_tokens": output_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "answer_tokens": answer_tokens,
                     "exact_match": max(exact_match(prediction, ref) for ref in references),
                     "token_f1": max(token_f1(prediction, ref) for ref in references),
                     "answer_containment": float(
@@ -157,8 +181,9 @@ def main() -> None:
     model_id, model_revision = validate_hf_model_config(model_config)
     chat_template_kwargs = effective_chat_template_kwargs(model_config)
     thinking_enabled = validate_thinking_configuration(model_config)
-    max_new_tokens = args.max_new_tokens or int(
-        model_config.get("generation", {}).get("max_new_tokens", 64)
+    generation_config = effective_generation_config(
+        model_config,
+        max_new_tokens=args.max_new_tokens,
     )
     validate_adapter_provenance(
         args.adapter,
@@ -221,12 +246,14 @@ def main() -> None:
         device_map="auto",
     )
     model.eval()
-    generation_config = model.generation_config
-    if generation_config is not None:
-        generation_config.do_sample = False
-        generation_config.temperature = None
-        generation_config.top_p = None
-        generation_config.top_k = None
+    model_generation_config = model.generation_config
+    if model_generation_config is not None and not bool(
+        generation_config.get("do_sample", False)
+    ):
+        model_generation_config.do_sample = False
+        model_generation_config.temperature = None
+        model_generation_config.top_p = None
+        model_generation_config.top_k = None
     torch.cuda.reset_peak_memory_stats()
 
     all_rows: list[dict[str, Any]] = []
@@ -239,9 +266,10 @@ def main() -> None:
             condition=condition,
             label="base",
             batch_size=args.batch_size,
-            max_new_tokens=max_new_tokens,
+            generation_config=generation_config,
             chat_template_kwargs=chat_template_kwargs,
             thinking_enabled=thinking_enabled,
+            seed=args.seed,
         )
         all_rows.extend(rows)
         summary[f"base_{condition}"] = aggregate(rows)
@@ -256,9 +284,10 @@ def main() -> None:
             condition=condition,
             label="tuned",
             batch_size=args.batch_size,
-            max_new_tokens=max_new_tokens,
+            generation_config=generation_config,
             chat_template_kwargs=chat_template_kwargs,
             thinking_enabled=thinking_enabled,
+            seed=args.seed,
         )
         all_rows.extend(rows)
         summary[f"tuned_{condition}"] = aggregate(rows)
@@ -283,13 +312,14 @@ def main() -> None:
         }
         for condition in ("rag", "oracle")
     }
-    summary["schema_version"] = 2
+    summary["schema_version"] = BENCHMARK_SCHEMA_VERSION
     summary["peak_allocated_vram_gb"] = torch.cuda.max_memory_allocated() / 1024**3
     summary["peak_reserved_vram_gb"] = torch.cuda.max_memory_reserved() / 1024**3
     summary["model_id"] = model_config["model_id"]
     summary["model_revision"] = model_config["revision"]
     summary["chat_template_kwargs"] = chat_template_kwargs
     summary["thinking_enabled"] = thinking_enabled
+    summary["seed"] = args.seed
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(args.output_dir / "predictions.jsonl", all_rows)
