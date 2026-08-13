@@ -24,7 +24,7 @@ from rag_adapt_lab.evaluation.generation import exact_match, normalize_text, tok
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.evaluation.statistics import paired_bootstrap_delta
 from rag_adapt_lab.generation.prompts import format_rag_user_prompt, rag_prompt_provenance
-from rag_adapt_lab.generation.transformers import parse_thinking_output
+from rag_adapt_lab.generation.thinking import parse_thinking_tokens
 from rag_adapt_lab.provenance import (
     BENCHMARK_SCHEMA_VERSION,
     file_sha256,
@@ -122,24 +122,16 @@ def run_generation(
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - started
         generated = outputs[:, inputs["input_ids"].shape[1] :]
-        raw_predictions = tokenizer.batch_decode(generated, skip_special_tokens=True)
         per_example_latency = elapsed / len(batch)
-        for row, raw_prediction in zip(batch, raw_predictions, strict=True):
-            reasoning, prediction = parse_thinking_output(
-                raw_prediction,
+        for row, generated_ids in zip(batch, generated.tolist(), strict=True):
+            parsed = parse_thinking_tokens(
+                generated_ids,
+                tokenizer=tokenizer,
                 thinking_enabled=thinking_enabled,
             )
+            prediction = parsed.answer
             references = row["references"]
             normalized_prediction = normalize_text(prediction)
-            output_tokens = len(
-                tokenizer(raw_prediction, add_special_tokens=False)["input_ids"]
-            )
-            reasoning_tokens = (
-                len(tokenizer(reasoning, add_special_tokens=False)["input_ids"])
-                if reasoning is not None
-                else 0
-            )
-            answer_tokens = len(tokenizer(prediction, add_special_tokens=False)["input_ids"])
             results.append(
                 {
                     "id": row["id"],
@@ -149,11 +141,14 @@ def run_generation(
                     "reference": row["reference"],
                     "references": references,
                     "prediction": prediction,
-                    "raw_prediction": raw_prediction,
-                    "reasoning": reasoning,
-                    "output_tokens": output_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "answer_tokens": answer_tokens,
+                    "raw_prediction": parsed.raw_text,
+                    "reasoning": parsed.reasoning,
+                    "output_tokens": parsed.output_tokens,
+                    "reasoning_tokens": parsed.reasoning_tokens,
+                    "answer_tokens": parsed.answer_tokens,
+                    "thinking_boundary_token_id": parsed.boundary_token_id,
+                    "thinking_boundary_found": parsed.boundary_found,
+                    "thinking_protocol_violation": parsed.thinking_protocol_violation,
                     "exact_match": max(exact_match(prediction, ref) for ref in references),
                     "token_f1": max(token_f1(prediction, ref) for ref in references),
                     "answer_containment": float(

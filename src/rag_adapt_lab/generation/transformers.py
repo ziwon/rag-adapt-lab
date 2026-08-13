@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,30 +15,7 @@ from rag_adapt_lab.provenance import AdapterVerification, validate_adapter_prove
 
 from .base import GenerationResult, Generator
 from .prompts import format_rag_user_prompt
-
-
-def parse_thinking_output(text: str, *, thinking_enabled: bool) -> tuple[str | None, str]:
-    """Separate Qwen-style reasoning from the answer used by EM/F1.
-
-    A thinking-enabled run must produce balanced tags when it emits a thinking
-    block. Unexpected balanced tags are also stripped in the concise condition
-    so hidden reasoning can never contaminate canonical answer metrics.
-    """
-    opens = len(re.findall(r"<think>", text, flags=re.IGNORECASE))
-    closes = len(re.findall(r"</think>", text, flags=re.IGNORECASE))
-    if opens != closes:
-        condition = "thinking-enabled" if thinking_enabled else "thinking-disabled"
-        raise ValueError(f"Malformed <think> output in {condition} condition: unbalanced tags")
-    if opens == 0:
-        return None, text.strip()
-    if opens > 1:
-        raise ValueError("Malformed <think> output: multiple reasoning blocks are ambiguous")
-    match = re.search(r"<think>(.*?)</think>", text, flags=re.IGNORECASE | re.DOTALL)
-    if match is None:
-        raise ValueError("Malformed <think> output: reasoning block could not be parsed")
-    reasoning = match.group(1).strip()
-    answer = (text[: match.start()] + text[match.end() :]).strip()
-    return reasoning, answer
+from .thinking import parse_thinking_tokens
 
 
 def validate_adapter_identity(
@@ -255,29 +231,25 @@ class TransformersGenerator(Generator):
         model_generate_latency = time.perf_counter() - started
         prompt_tokens = int(inputs["input_ids"].shape[1])
         generated = outputs[:, prompt_tokens:]
-        output_tokens = int(generated.shape[1])
         stage_started = time.perf_counter()
-        raw_text = self.tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
-        reasoning, text = parse_thinking_output(
-            raw_text,
+        parsed = parse_thinking_tokens(
+            generated[0].tolist(),
+            tokenizer=self.tokenizer,
             thinking_enabled=self.thinking_enabled,
         )
-        reasoning_tokens = (
-            len(self.tokenizer(reasoning, add_special_tokens=False)["input_ids"])
-            if reasoning is not None
-            else 0
-        )
-        answer_tokens = len(self.tokenizer(text, add_special_tokens=False)["input_ids"])
         decode_latency = time.perf_counter() - stage_started
         inference_e2e_latency = time.perf_counter() - inference_started
         return GenerationResult(
-            text=text,
-            raw_text=raw_text,
-            reasoning=reasoning,
+            text=parsed.answer,
+            raw_text=parsed.raw_text,
+            reasoning=parsed.reasoning,
             prompt_tokens=prompt_tokens,
-            output_tokens=output_tokens,
-            reasoning_tokens=reasoning_tokens,
-            answer_tokens=answer_tokens,
+            output_tokens=parsed.output_tokens,
+            reasoning_tokens=parsed.reasoning_tokens,
+            answer_tokens=parsed.answer_tokens,
+            thinking_boundary_token_id=parsed.boundary_token_id,
+            thinking_boundary_found=parsed.boundary_found,
+            thinking_protocol_violation=parsed.thinking_protocol_violation,
             prompt_build_latency_s=prompt_build_latency,
             chat_template_latency_s=chat_template_latency,
             tokenization_latency_s=tokenization_latency,

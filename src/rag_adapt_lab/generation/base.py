@@ -9,7 +9,7 @@ class GenerationResult:
     """One decoded answer plus an auditable inference-stage breakdown.
 
     ``latency_s`` remains as a deprecated alias for
-    ``model_generate_latency_s`` through schema version 2.
+    ``model_generate_latency_s`` in schema version 3.
     """
 
     text: str
@@ -19,6 +19,9 @@ class GenerationResult:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     answer_tokens: int | None = None
+    thinking_boundary_token_id: int | None = None
+    thinking_boundary_found: bool = False
+    thinking_protocol_violation: str | None = None
     prompt_build_latency_s: float | None = None
     chat_template_latency_s: float | None = None
     tokenization_latency_s: float | None = None
