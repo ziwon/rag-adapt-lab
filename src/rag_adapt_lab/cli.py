@@ -20,13 +20,26 @@ from rag_adapt_lab.data.raft import (
 )
 from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
 from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
-from rag_adapt_lab.evaluation.scorers import build_scorer
+from rag_adapt_lab.evaluation.scorers import NoOpScorer, build_scorer, validate_scorer_config
 from rag_adapt_lab.generation.prompts import rag_prompt_provenance
-from rag_adapt_lab.provenance import BENCHMARK_SCHEMA_VERSION
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
 from rag_adapt_lab.retrieval.factory import create_retriever
 from rag_adapt_lab.tracking.base import Tracker
+
+
+class _StaticOnlyGeneratorFactory:
+    def create(self, adapter_path: str | Path | None) -> None:
+        raise RuntimeError("Static validation must never load model weights")
+
+
+def _validate_output_destination(output_dir: Path, plan_output: Path | None) -> None:
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(f"Benchmark output path is not a directory: {output_dir}")
+    if plan_output is not None and plan_output.exists() and not plan_output.is_file():
+        raise ValueError(f"Plan output path is not a file: {plan_output}")
+    if plan_output is not None and plan_output.resolve() == output_dir.resolve():
+        raise ValueError("Plan output and benchmark output directory must be different")
 
 app = typer.Typer(help="Domain-neutral RAG adaptation research harness.", no_args_is_help=True)
 console = Console()
@@ -246,13 +259,25 @@ def benchmark(
     warmup_examples: int = typer.Option(1, min=0),
     load_in_4bit: bool = typer.Option(False, "--load-in-4bit"),
     tracking_backend: str = typer.Option("none", "--tracking-backend"),
+    plan_only: bool = typer.Option(
+        False,
+        "--plan-only",
+        help="Validate and emit only the structural execution plan.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run"),
     allow_unverified_adapter: bool = typer.Option(
         False,
         "--allow-unverified-adapter",
         help="Permit legacy adapters but mark the benchmark as unverified.",
     ),
+    allow_unmatched_training_controls: bool = typer.Option(
+        False,
+        "--allow-unmatched-training-controls",
+        help="Run a visibly confounded SFT/RAFT comparison with different training controls.",
+    ),
 ) -> None:
+    if plan_only and dry_run:
+        raise typer.BadParameter("--plan-only and --dry-run are mutually exclusive")
     requested = [item.strip() for item in recipes.split(",") if item.strip()]
     allowed = {"base", "rag", "sft-rag", "raft-rag"}
     unknown = sorted(set(requested) - allowed)
@@ -305,8 +330,15 @@ def benchmark(
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--recipes") from exc
+    if tracking_backend not in {"none", "wandb"}:
+        raise typer.BadParameter("Expected none or wandb", param_hint="--tracking-backend")
+    try:
+        _validate_output_destination(output_dir, plan_output)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--output-dir") from exc
     payload = {
-        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "schema_name": "benchmark-plan",
+        "schema_version": 1,
         "fixed_contract": {
             "model_config": str(model_config),
             "documents": str(documents),
@@ -322,16 +354,28 @@ def benchmark(
             "warmup_examples": warmup_examples,
             "load_in_4bit": load_in_4bit,
             "allow_unverified_adapter": allow_unverified_adapter,
+            "allow_unmatched_training_controls": allow_unmatched_training_controls,
         },
         "jobs": [job.as_dict() for job in jobs],
     }
-    rendered = json.dumps(payload, indent=2)
-    if plan_output:
-        plan_output.parent.mkdir(parents=True, exist_ok=True)
-        plan_output.write_text(rendered + "\n", encoding="utf-8")
-        console.print(f"[green]Benchmark plan written:[/green] {plan_output}")
-    if dry_run:
-        console.print(rendered)
+    if plan_only:
+        payload["validation"] = {
+            "validation_level": "structural",
+            "model_weights_loaded": False,
+            "adapter_provenance_validated": False,
+            "training_controls_matched": None,
+            "scorer_configuration_validated": False,
+            "ready_for_execution": False,
+        }
+        from rag_adapt_lab.schema_validation import validate_artifact_schema
+
+        validate_artifact_schema(payload, "benchmark-plan-v1.schema.json")
+        rendered = json.dumps(payload, indent=2)
+        if plan_output:
+            plan_output.parent.mkdir(parents=True, exist_ok=True)
+            plan_output.write_text(rendered + "\n", encoding="utf-8")
+            console.print(f"[green]Benchmark plan written:[/green] {plan_output}")
+        typer.echo(rendered)
         return
 
     for recipe, adapter in adapters.items():
@@ -349,21 +393,75 @@ def benchmark(
     from rag_adapt_lab.tracking.null import NullTracker
     from rag_adapt_lab.tracking.wandb import WandbTracker
 
+    try:
+        validate_scorer_config(scorer_values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="--scorer-config") from exc
+
+    common_runner_values = {
+        "jobs": jobs,
+        "model_config": model_values,
+        "documents": loaded_documents,
+        "examples": loaded_examples,
+        "retriever": create_retriever(retriever_values),
+        "retriever_config": retriever_values,
+        "output_dir": output_dir,
+        "top_k": resolved_top_k,
+        "bootstrap_samples": bootstrap_samples,
+        "seed": seed,
+        "warmup_examples": warmup_examples,
+        "generator_config": {
+            "backend": "transformers",
+            "load_in_4bit": load_in_4bit,
+            "paired_seed_schedule": True,
+            "warmup_examples": warmup_examples,
+        },
+        "model_config_path": model_config,
+        "documents_path": documents,
+        "eval_path": eval_set,
+        "allow_unverified_adapter": allow_unverified_adapter,
+        "allow_unmatched_training_controls": allow_unmatched_training_controls,
+    }
+    if dry_run:
+        try:
+            static_runner = BenchmarkRunner(
+                **common_runner_values,
+                generator_factory=_StaticOnlyGeneratorFactory(),
+                scorer=NoOpScorer(),
+                tracker=NullTracker(),
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise typer.BadParameter(str(exc), param_hint="--dry-run") from exc
+        payload["validation"] = {
+            "validation_level": "static-protocol",
+            "model_weights_loaded": False,
+            "adapter_provenance_validated": all(
+                verification.verified
+                for verification in static_runner.adapter_verifications.values()
+            ),
+            "training_controls_matched": static_runner.training_controls_matched,
+            "scorer_configuration_validated": True,
+            "ready_for_execution": True,
+        }
+        from rag_adapt_lab.schema_validation import validate_artifact_schema
+
+        validate_artifact_schema(payload, "benchmark-plan-v1.schema.json")
+        rendered = json.dumps(payload, indent=2)
+        if plan_output:
+            plan_output.parent.mkdir(parents=True, exist_ok=True)
+            plan_output.write_text(rendered + "\n", encoding="utf-8")
+            console.print(f"[green]Static validation report written:[/green] {plan_output}")
+        typer.echo(rendered)
+        return
+
     tracker: Tracker
     if tracking_backend == "none":
         tracker = NullTracker()
-    elif tracking_backend == "wandb":
-        tracker = WandbTracker()
     else:
-        raise typer.BadParameter("Expected none or wandb", param_hint="--tracking-backend")
+        tracker = WandbTracker()
 
     runner = BenchmarkRunner(
-        jobs=jobs,
-        model_config=model_values,
-        documents=loaded_documents,
-        examples=loaded_examples,
-        retriever=create_retriever(retriever_values),
-        retriever_config=retriever_values,
+        **common_runner_values,
         generator_factory=TransformersGeneratorFactory(
             model_config=model_values,
             load_in_4bit=load_in_4bit,
@@ -371,22 +469,7 @@ def benchmark(
             allow_unverified_adapter=allow_unverified_adapter,
         ),
         scorer=build_scorer(scorer_values),
-        output_dir=output_dir,
-        top_k=resolved_top_k,
-        bootstrap_samples=bootstrap_samples,
-        seed=seed,
-        warmup_examples=warmup_examples,
         tracker=tracker,
-        generator_config={
-            "backend": "transformers",
-            "load_in_4bit": load_in_4bit,
-            "paired_seed_schedule": True,
-            "warmup_examples": warmup_examples,
-        },
-        model_config_path=model_config,
-        documents_path=documents,
-        eval_path=eval_set,
-        allow_unverified_adapter=allow_unverified_adapter,
     )
     runner.run()
     console.print(f"[green]Benchmark complete:[/green] {output_dir / 'summary.json'}")
