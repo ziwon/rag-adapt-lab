@@ -91,6 +91,17 @@ def test_callable_judge_backend_is_pluggable_versioned_and_cached() -> None:
     assert scorer.metadata()["backend"]["revision"] == "0" * 40
 
 
+def test_judge_coverage_thresholds_are_explicit_metadata() -> None:
+    scorer = LLMJudgeScorer(
+        CallableJudgeBackend(lambda prompt: valid_judgment()),
+        minimum_metric_coverage=0.75,
+        minimum_paired_examples=12,
+    )
+    assert scorer.judge_coverage_requirements() == (0.75, 12)
+    assert scorer.metadata()["minimum_metric_coverage"] == 0.75
+    assert scorer.metadata()["minimum_paired_examples"] == 12
+
+
 def test_persistent_judge_cache_is_transactional_sqlite(tmp_path) -> None:
     calls = 0
 

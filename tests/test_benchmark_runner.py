@@ -274,6 +274,52 @@ def test_comparisons_skip_optional_metrics_without_numeric_pairs() -> None:
     assert set(comparisons["base->rag"]) == {"exact_match", "token_f1"}
 
 
+def test_comparisons_preserve_disjoint_judge_coverage_diagnostics() -> None:
+    runner = object.__new__(BenchmarkRunner)
+    runner.bootstrap_samples = 20
+    runner.seed = 7
+    runner.minimum_judge_metric_coverage = 0.8
+    runner.minimum_paired_judge_examples = 1
+    runner.training_controls_matched = None
+    comparisons = runner._comparisons(
+        {
+            "base": [
+                {
+                    "id": "a",
+                    "exact_match": 0.0,
+                    "token_f1": 0.0,
+                    "scores": {"judge_status": "ok", "judge_correctness": 0.2},
+                },
+                {
+                    "id": "b",
+                    "exact_match": 0.0,
+                    "token_f1": 0.0,
+                    "scores": {"judge_status": "error"},
+                },
+            ],
+            "rag": [
+                {
+                    "id": "a",
+                    "exact_match": 1.0,
+                    "token_f1": 1.0,
+                    "scores": {"judge_status": "error"},
+                },
+                {
+                    "id": "b",
+                    "exact_match": 1.0,
+                    "token_f1": 1.0,
+                    "scores": {"judge_status": "ok", "judge_correctness": 0.8},
+                },
+            ],
+        }
+    )
+    judge = comparisons["base->rag"]["judge_correctness"]
+    assert judge["baseline_numeric_examples"] == 1
+    assert judge["candidate_numeric_examples"] == 1
+    assert judge["paired_examples"] == 0
+    assert judge["status"] == "insufficient_coverage"
+
+
 def test_benchmark_rejects_mismatched_sft_and_raft_source_partitions(
     tmp_path: Path,
 ) -> None:

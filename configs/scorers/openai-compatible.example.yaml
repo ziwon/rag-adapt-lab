@@ -20,4 +20,6 @@ judge:
   cache: true
   cache_path: .cache/raglab/judge-cache.sqlite3
   concurrency_limit: 1
+  minimum_metric_coverage: 0.8
+  minimum_paired_examples: 30
   structured_output: true

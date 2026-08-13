@@ -32,7 +32,14 @@ def mean_numeric(rows: Sequence[Mapping[str, Any]], metric: str) -> float | None
     return statistics.fmean(values) if values else None
 
 
-def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def aggregate_prediction_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    minimum_judge_metric_coverage: float = 0.8,
+) -> dict[str, Any]:
+    if not 0.0 <= minimum_judge_metric_coverage <= 1.0:
+        raise ValueError("minimum_judge_metric_coverage must be between 0 and 1")
+
     def numeric_values(field: str, *, retrieval_only: bool = False) -> list[float]:
         return [
             float(row[field])
@@ -100,7 +107,11 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
             for row in rows
             if isinstance(row.get("prompt_tokens"), (int, float))
         ),
-        "output_tokens_total": sum(int(tokens) for tokens, _ in token_timings),
+        "output_tokens_total": sum(
+            int(row["output_tokens"])
+            for row in rows
+            if isinstance(row.get("output_tokens"), (int, float))
+        ),
         "reasoning_tokens_total": sum(
             int(row["reasoning_tokens"])
             for row in rows
@@ -129,10 +140,11 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
                 "judge_examples": len(judge_rows),
                 "judge_successes": judge_successes,
                 "judge_failures": judge_failures,
-                "judge_coverage": judge_successes / len(judge_rows),
+                "judge_coverage": judge_successes / len(rows) if rows else 0.0,
                 "judge_failure_rate": judge_failures / len(judge_rows),
                 "judge_cache_hits": cache_hits,
                 "judge_cache_misses": len(judge_rows) - cache_hits,
+                "judge_total_evaluation_examples": len(rows),
             }
         )
     else:
@@ -145,6 +157,7 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
                 "judge_failure_rate": None,
                 "judge_cache_hits": 0,
                 "judge_cache_misses": 0,
+                "judge_total_evaluation_examples": len(rows),
             }
         )
 
@@ -186,6 +199,40 @@ def aggregate_prediction_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
             and not isinstance(row.get("scores", {}).get(metric), bool)
         ]
         summary[metric] = statistics.fmean(values) if values else None
+    judge_metric_names = (
+        "judge_correctness",
+        "judge_groundedness",
+        "judge_unsupported_claim_rate",
+    )
+    judge_metrics: dict[str, Any] = {}
+    for metric in judge_metric_names:
+        numeric_rows = [
+            row
+            for row in rows
+            if isinstance(row.get("scores", {}).get(metric), (int, float))
+            and not isinstance(row.get("scores", {}).get(metric), bool)
+        ]
+        coverage = len(numeric_rows) / len(rows) if rows and judge_rows else None
+        judge_metrics[metric] = {
+            "total_evaluation_examples": len(rows),
+            "numeric_examples": len(numeric_rows),
+            "judge_successes": summary["judge_successes"],
+            "judge_failures": summary["judge_failures"],
+            "coverage": coverage,
+            "cache_hits": summary["judge_cache_hits"],
+            "cache_misses": summary["judge_cache_misses"],
+            "minimum_coverage": minimum_judge_metric_coverage,
+            "status": (
+                "not_applicable"
+                if not judge_rows
+                else (
+                    "ok"
+                    if coverage is not None and coverage >= minimum_judge_metric_coverage
+                    else "insufficient_coverage"
+                )
+            ),
+        }
+    summary["judge_metrics"] = judge_metrics
     return summary
 
 
@@ -196,9 +243,15 @@ def paired_bootstrap_delta(
     metric: str,
     samples: int = 10_000,
     seed: int = 42,
-) -> dict[str, float | int | bool | str]:
+    minimum_coverage: float = 0.0,
+    minimum_paired_examples: int = 1,
+) -> dict[str, Any]:
     if samples < 1:
         raise ValueError("samples must be positive")
+    if not 0.0 <= minimum_coverage <= 1.0:
+        raise ValueError("minimum_coverage must be between 0 and 1")
+    if minimum_paired_examples < 1:
+        raise ValueError("minimum_paired_examples must be positive")
 
     def metric_value(row: Mapping[str, Any]) -> float | None:
         value = row.get(metric)
@@ -218,13 +271,43 @@ def paired_bootstrap_delta(
     candidate = {str(row["id"]): metric_value(row) for row in candidate_rows}
     if baseline.keys() != candidate.keys():
         raise ValueError(f"Cannot pair metric {metric!r}: example IDs differ")
+    baseline_numeric_ids = {row_id for row_id, value in baseline.items() if value is not None}
+    candidate_numeric_ids = {row_id for row_id, value in candidate.items() if value is not None}
+    paired_ids = sorted(baseline_numeric_ids & candidate_numeric_ids)
+    dropped_ids = sorted(set(baseline) - set(paired_ids))
+    total_examples = len(baseline)
+    paired_coverage = len(paired_ids) / total_examples if total_examples else 0.0
+    diagnostics: dict[str, Any] = {
+        "total_examples": total_examples,
+        "baseline_total_examples": len(baseline_rows),
+        "candidate_total_examples": len(candidate_rows),
+        "baseline_numeric_examples": len(baseline_numeric_ids),
+        "candidate_numeric_examples": len(candidate_numeric_ids),
+        "paired_examples": len(paired_ids),
+        "paired_coverage": paired_coverage,
+        "dropped_examples": len(dropped_ids),
+        "dropped_example_ids": dropped_ids,
+        "minimum_coverage": minimum_coverage,
+        "minimum_paired_examples": minimum_paired_examples,
+    }
+    if not paired_ids:
+        return {
+            **diagnostics,
+            "examples": 0,
+            "delta": None,
+            "ci95_low": None,
+            "ci95_high": None,
+            "bootstrap_samples": samples,
+            "method": "paired-percentile-bootstrap",
+            "ci_excludes_zero": False,
+            "statistically_significant": False,
+            "decision_eligible": False,
+            "status": "insufficient_coverage",
+        }
     deltas = [
         candidate[row_id] - baseline[row_id]  # type: ignore[operator]
-        for row_id in sorted(baseline)
-        if baseline[row_id] is not None and candidate[row_id] is not None
+        for row_id in paired_ids
     ]
-    if not deltas:
-        raise ValueError(f"Cannot pair metric {metric!r}: no numeric paired values")
 
     # Chunked NumPy sampling keeps the default 10k bootstrap practical for
     # evaluation sets with thousands of examples without allocating an
@@ -239,12 +322,21 @@ def paired_bootstrap_delta(
         means.extend(np.mean(delta_values[indices], axis=1).tolist())
     low = percentile(means, 0.025)
     high = percentile(means, 0.975)
+    coverage_sufficient = (
+        paired_coverage >= minimum_coverage
+        and len(deltas) >= minimum_paired_examples
+    )
+    ci_excludes_zero = low > 0.0 or high < 0.0
     return {
+        **diagnostics,
         "examples": len(deltas),
         "delta": statistics.fmean(deltas),
         "ci95_low": low,
         "ci95_high": high,
         "bootstrap_samples": samples,
         "method": "paired-percentile-bootstrap",
-        "statistically_significant": low > 0.0 or high < 0.0,
+        "ci_excludes_zero": ci_excludes_zero,
+        "statistically_significant": ci_excludes_zero and coverage_sufficient,
+        "decision_eligible": coverage_sufficient,
+        "status": "ok" if coverage_sufficient else "insufficient_coverage",
     }

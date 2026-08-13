@@ -204,6 +204,13 @@ class BenchmarkRunner:
         self.provenance_warnings: list[str] = []
         self.training_controls_matched: bool | None = None
         self.training_control_mismatches: list[str] = []
+        judge_requirements = self.scorer.judge_coverage_requirements()
+        self.minimum_judge_metric_coverage = (
+            judge_requirements[0] if judge_requirements is not None else 0.0
+        )
+        self.minimum_paired_judge_examples = (
+            judge_requirements[1] if judge_requirements is not None else 1
+        )
 
         if not self.documents:
             raise ValueError("Benchmark corpus must contain at least one document")
@@ -520,7 +527,10 @@ class BenchmarkRunner:
                     "tokens_per_second": output_tokens_per_second,
                 }
             )
-        metrics = aggregate_prediction_rows(rows)
+        metrics = aggregate_prediction_rows(
+            rows,
+            minimum_judge_metric_coverage=self.minimum_judge_metric_coverage,
+        )
         metrics["peak_allocated_vram_gb"] = generator.peak_allocated_vram_gb()
         metrics["peak_reserved_vram_gb"] = generator.peak_reserved_vram_gb()
         metrics["peak_gpu_vram_gb"] = metrics["peak_allocated_vram_gb"]
@@ -547,6 +557,9 @@ class BenchmarkRunner:
         def has_numeric_pairs(baseline: str, candidate: str, metric: str) -> bool:
             return bool(numeric_ids(baseline, metric) & numeric_ids(candidate, metric))
 
+        def judge_was_attempted(recipe: str) -> bool:
+            return any("judge_status" in row.get("scores", {}) for row in rows_by_recipe[recipe])
+
         for baseline, candidate in COMPARISON_PAIRS:
             if baseline not in rows_by_recipe or candidate not in rows_by_recipe:
                 continue
@@ -560,14 +573,19 @@ class BenchmarkRunner:
                 "reference_overlap",
                 "lexical_groundedness",
                 "lexical_unsupported_claim_rate",
-                "judge_correctness",
-                "judge_groundedness",
-                "judge_unsupported_claim_rate",
                 "citation_precision",
                 "citation_recall",
             ):
                 if has_numeric_pairs(baseline, candidate, optional):
                     metrics.append(optional)
+            if judge_was_attempted(baseline) or judge_was_attempted(candidate):
+                metrics.extend(
+                    (
+                        "judge_correctness",
+                        "judge_groundedness",
+                        "judge_unsupported_claim_rate",
+                    )
+                )
             comparisons[pair] = {
                 metric: paired_bootstrap_delta(
                     rows_by_recipe[baseline],
@@ -575,6 +593,16 @@ class BenchmarkRunner:
                     metric=metric,
                     samples=self.bootstrap_samples,
                     seed=_comparison_seed(self.seed, pair, metric),
+                    minimum_coverage=(
+                        self.minimum_judge_metric_coverage
+                        if metric.startswith("judge_")
+                        else 0.0
+                    ),
+                    minimum_paired_examples=(
+                        self.minimum_paired_judge_examples
+                        if metric.startswith("judge_")
+                        else 1
+                    ),
                 )
                 for metric in metrics
             }

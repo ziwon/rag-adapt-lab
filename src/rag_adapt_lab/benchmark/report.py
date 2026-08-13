@@ -17,10 +17,6 @@ def _number(value: object, *, digits: int = 3) -> str:
     return f"{float(value):.{digits}f}"
 
 
-def _preferred_metric(metrics: Mapping[str, Any], judge: str, fallback: str) -> object:
-    return metrics.get(judge) if metrics.get(judge) is not None else metrics.get(fallback)
-
-
 def _with_unit(value: object, unit: str, *, digits: int = 3) -> str:
     rendered = _number(value, digits=digits)
     return rendered if rendered == "—" else f"{rendered}{unit}"
@@ -51,24 +47,32 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     lines = [
         "# RAG adaptation benchmark report",
         "",
-        "| Recipe | EM | Token F1 | Correctness | Groundedness | p50 Inference | p95 Inference | Output tok/s | Allocated VRAM | Reserved VRAM |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Recipe | EM | Token F1 | Reference overlap | Judge correctness | Lexical groundedness | Judge groundedness | Judge coverage | p50 Inference | p95 Inference | Output tok/s | Allocated VRAM | Reserved VRAM |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     recipes = summary.get("recipes", {})
     for recipe, values in recipes.items():
         metrics = values.get("metrics", {})
-        correctness = _preferred_metric(metrics, "judge_correctness", "reference_overlap")
-        groundedness = _preferred_metric(
-            metrics, "judge_groundedness", "lexical_groundedness"
+        judge_metric = metrics.get("judge_metrics", {}).get("judge_correctness", {})
+        numeric_judge = int(judge_metric.get("numeric_examples", 0))
+        total_examples = int(judge_metric.get("total_evaluation_examples", 0))
+        judge_coverage = (
+            f"{numeric_judge}/{total_examples} ({numeric_judge / total_examples:.1%})"
+            if metrics.get("judge_examples", 0) and total_examples
+            else "—"
         )
         lines.append(
-            "| {name} | {em} | {f1} | {correctness} | {groundedness} | {p50} | "
-            "{p95} | {throughput} | {allocated} | {reserved} |".format(
+            "| {name} | {em} | {f1} | {overlap} | {judge_correctness} | "
+            "{lexical_groundedness} | {judge_groundedness} | {judge_coverage} | "
+            "{p50} | {p95} | {throughput} | {allocated} | {reserved} |".format(
                 name=DISPLAY_NAMES.get(recipe, recipe),
                 em=_number(metrics.get("exact_match")),
                 f1=_number(metrics.get("token_f1")),
-                correctness=_number(correctness),
-                groundedness=_number(groundedness),
+                overlap=_number(metrics.get("reference_overlap")),
+                judge_correctness=_number(metrics.get("judge_correctness")),
+                lexical_groundedness=_number(metrics.get("lexical_groundedness")),
+                judge_groundedness=_number(metrics.get("judge_groundedness")),
+                judge_coverage=judge_coverage,
                 p50=_with_unit(metrics.get("inference_e2e_latency_p50_s"), "s"),
                 p95=_with_unit(metrics.get("inference_e2e_latency_p95_s"), "s"),
                 throughput=_number(
@@ -83,9 +87,9 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Correctness uses the configured judge when available and otherwise reports the "
-            "deterministic `reference_overlap` score. Groundedness is explicitly lexical unless "
-            "a judge metric is available. Judge time is excluded from inference latency.",
+            "`reference_overlap` is a deterministic reference-token overlap score and uses the "
+            "same normalization as Token F1; it is not a semantic judge. Lexical and judge "
+            "groundedness remain separate. Judge time is excluded from inference latency.",
             "",
             "## Decision summary",
             "",
@@ -133,12 +137,12 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
     if not judge_rows:
         lines.append("The optional LLM judge was disabled; canonical EM and Token F1 are unaffected.")
     else:
-        total = sum(int(metrics.get("judge_examples", 0)) for metrics in judge_rows)
+        total = sum(int(metrics.get("judge_total_evaluation_examples", 0)) for metrics in judge_rows)
         failures = sum(int(metrics.get("judge_failures", 0)) for metrics in judge_rows)
-        successes = total - failures
+        successes = sum(int(metrics.get("judge_successes", 0)) for metrics in judge_rows)
         lines.append(
-            f"Judge coverage: {_number(successes / total if total else None)}; failure rate: "
-            f"{_number(failures / total if total else None)} ({failures}/{total})."
+            f"Judge coverage: {successes}/{total} "
+            f"({_number(successes / total if total else None)}); failures: {failures}."
         )
 
     lines.extend(["", "## Paired comparisons", ""])
@@ -152,10 +156,17 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         lines.append("")
         for metric, result in values.items():
             significant = "yes" if result.get("statistically_significant") else "no"
+            paired = int(result.get("paired_examples", result.get("examples", 0)))
+            total = int(result.get("total_examples", result.get("examples", 0)))
+            coverage = result.get("paired_coverage")
+            status = result.get("status", "ok")
             lines.append(
                 f"- `{metric}` delta: {_number(result.get('delta'))}; "
                 f"95% bootstrap CI [{_number(result.get('ci95_low'))}, "
-                f"{_number(result.get('ci95_high'))}]; significant: {significant}."
+                f"{_number(result.get('ci95_high'))}]; significant: {significant}; "
+                f"paired examples: {paired}/{total}; paired coverage: "
+                f"{_with_unit(100 * coverage if isinstance(coverage, (int, float)) else None, '%', digits=1)}; "
+                f"status: `{status}`."
             )
         lines.append("")
 

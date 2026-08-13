@@ -8,3 +8,5 @@ judge:
   timeout_seconds: 30
   max_retries: 2
   cache: true
+  minimum_metric_coverage: 0.8
+  minimum_paired_examples: 30

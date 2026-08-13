@@ -38,6 +38,9 @@ class Scorer(ABC):
     def metadata(self) -> dict[str, Any]:
         return {"name": self.name, "version": self.version}
 
+    def judge_coverage_requirements(self) -> tuple[float, int] | None:
+        return None
+
 
 class NoOpScorer(Scorer):
     name = "noop"
@@ -498,6 +501,8 @@ class LLMJudgeScorer(Scorer):
         cache: bool = True,
         cache_path: str | Path | None = None,
         concurrency_limit: int = 1,
+        minimum_metric_coverage: float = 0.8,
+        minimum_paired_examples: int = 30,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if max_retries < 0:
@@ -506,12 +511,18 @@ class LLMJudgeScorer(Scorer):
             raise ValueError("retry_backoff_seconds must be non-negative")
         if concurrency_limit < 1:
             raise ValueError("concurrency_limit must be positive")
+        if not 0.0 <= minimum_metric_coverage <= 1.0:
+            raise ValueError("minimum_metric_coverage must be between 0 and 1")
+        if minimum_paired_examples < 1:
+            raise ValueError("minimum_paired_examples must be positive")
         self.backend = backend
         self.strict = strict
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.cache = DeterministicJudgeCache(enabled=cache, path=cache_path)
         self.concurrency_limit = concurrency_limit
+        self.minimum_metric_coverage = minimum_metric_coverage
+        self.minimum_paired_examples = minimum_paired_examples
         self._semaphore = threading.BoundedSemaphore(concurrency_limit)
         self._sleep = sleep
 
@@ -526,7 +537,12 @@ class LLMJudgeScorer(Scorer):
             "cache": self.cache.enabled,
             "cache_path": str(self.cache.path) if self.cache.path is not None else None,
             "concurrency_limit": self.concurrency_limit,
+            "minimum_metric_coverage": self.minimum_metric_coverage,
+            "minimum_paired_examples": self.minimum_paired_examples,
         }
+
+    def judge_coverage_requirements(self) -> tuple[float, int]:
+        return self.minimum_metric_coverage, self.minimum_paired_examples
 
     def _validate_judgment(self, judged: Mapping[str, Any]) -> ScoreResult:
         output: ScoreResult = {}
@@ -670,6 +686,18 @@ class CompositeScorer(Scorer):
     def metadata(self) -> dict[str, Any]:
         return {**super().metadata(), "scorers": [scorer.metadata() for scorer in self.scorers]}
 
+    def judge_coverage_requirements(self) -> tuple[float, int] | None:
+        requirements = [
+            value
+            for scorer in self.scorers
+            if (value := scorer.judge_coverage_requirements()) is not None
+        ]
+        if not requirements:
+            return None
+        if len(set(requirements)) != 1:
+            raise ValueError("Configured judge scorers use inconsistent coverage requirements")
+        return requirements[0]
+
     def score(
         self,
         *,
@@ -699,9 +727,58 @@ class CompositeScorer(Scorer):
         return combined
 
 
+def validate_scorer_config(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Validate scorer syntax without constructing clients or contacting endpoints."""
+    values = dict(config or {})
+    if values.get("mode") == "disabled":
+        return values
+
+    lexical = values.get("lexical_groundedness", {})
+    if lexical is not False:
+        if lexical is not None and not isinstance(lexical, Mapping):
+            raise ValueError("lexical_groundedness must be a mapping or false")
+        lexical_values = dict(lexical or {})
+        threshold = float(lexical_values.get("claim_support_threshold", 0.5))
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("claim_support_threshold must be between 0 and 1")
+
+    judge = values.get("judge")
+    if judge is not None and not isinstance(judge, Mapping):
+        raise ValueError("judge must be a mapping")
+    if isinstance(judge, Mapping) and judge.get("kind", "disabled") != "disabled":
+        kind = str(judge.get("kind"))
+        if kind != "openai-compatible":
+            raise ValueError(f"Unsupported configured judge backend: {kind!r}")
+        for field in ("base_url", "model"):
+            if not isinstance(judge.get(field), str) or not str(judge[field]).strip():
+                raise ValueError(f"Configured judge requires a non-empty {field}")
+        if int(judge.get("max_retries", 2)) < 0:
+            raise ValueError("max_retries must be non-negative")
+        if float(judge.get("retry_backoff_seconds", 0.5)) < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
+        if int(judge.get("concurrency_limit", 1)) < 1:
+            raise ValueError("concurrency_limit must be positive")
+        if float(judge.get("connection_timeout_seconds", judge.get("timeout_seconds", 30))) <= 0:
+            raise ValueError("connection_timeout_seconds must be positive")
+        if float(judge.get("read_timeout_seconds", judge.get("timeout_seconds", 30))) <= 0:
+            raise ValueError("read_timeout_seconds must be positive")
+        if int(judge.get("max_response_bytes", 32_768)) < 128:
+            raise ValueError("max_response_bytes must be at least 128")
+        if int(judge.get("max_completion_tokens", 256)) < 1:
+            raise ValueError("max_completion_tokens must be positive")
+        if int(judge.get("max_rationale_characters", 1_000)) < 1:
+            raise ValueError("max_rationale_characters must be positive")
+        minimum_coverage = float(judge.get("minimum_metric_coverage", 0.8))
+        if not 0.0 <= minimum_coverage <= 1.0:
+            raise ValueError("minimum_metric_coverage must be between 0 and 1")
+        if int(judge.get("minimum_paired_examples", 30)) < 1:
+            raise ValueError("minimum_paired_examples must be positive")
+    return values
+
+
 def build_scorer(config: Mapping[str, Any] | None = None) -> Scorer:
     """Build deterministic scorers plus an optional reproducible judge backend."""
-    values = dict(config or {})
+    values = validate_scorer_config(config)
     if values.get("mode") == "disabled":
         return NoOpScorer()
 
@@ -753,6 +830,10 @@ def build_scorer(config: Mapping[str, Any] | None = None) -> Scorer:
                 cache=cache_enabled,
                 cache_path=str(cache_path) if cache_enabled and cache_path else None,
                 concurrency_limit=int(judge.get("concurrency_limit", 1)),
+                minimum_metric_coverage=float(
+                    judge.get("minimum_metric_coverage", 0.8)
+                ),
+                minimum_paired_examples=int(judge.get("minimum_paired_examples", 30)),
             )
         )
     return CompositeScorer(scorers)
