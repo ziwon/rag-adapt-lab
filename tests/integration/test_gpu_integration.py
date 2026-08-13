@@ -32,6 +32,7 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
     from rag_adapt_lab.evaluation.scorers import build_scorer
     from rag_adapt_lab.recipes.plan import build_plan
     from rag_adapt_lab.retrieval.factory import create_retriever
+    from rag_adapt_lab.schema_validation import validate_artifact_schema
     from rag_adapt_lab.training.qlora import train_qlora
 
     model_dir = tmp_path / "tiny-model"
@@ -149,16 +150,26 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
     sft_validation = tmp_path / "sft-validation.jsonl"
     raft_train = tmp_path / "raft-train.jsonl"
     raft_validation = tmp_path / "raft-validation.jsonl"
+    source_train = [
+        {"id": "q1", "question": "question alpha one", "answer": "alpha"},
+        {"id": "q2", "question": "question beta two", "answer": "beta"},
+    ]
+    source_validation = [
+        {"id": "q3", "question": "question alpha validation", "answer": "alpha"}
+    ]
     write_jsonl(
         sft_train,
         [
-            {"id": "s1", "input": "question alpha one", "output": "alpha"},
-            {"id": "s2", "input": "question beta two", "output": "beta"},
+            {"id": row["id"], "input": row["question"], "output": row["answer"]}
+            for row in source_train
         ],
     )
     write_jsonl(
         sft_validation,
-        [{"id": "sv", "input": "question alpha validation", "output": "alpha"}],
+        [
+            {"id": row["id"], "input": row["question"], "output": row["answer"]}
+            for row in source_validation
+        ],
     )
     raft_contexts = [
         {"doc_id": "alpha", "text": "alpha answer", "relevant": True},
@@ -168,31 +179,22 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
         raft_train,
         [
             {
-                "id": "r1",
-                "question": "question alpha raft",
-                "answer": "alpha",
-                "contexts": raft_contexts,
-                "evidence_doc_ids": ["alpha"],
-            },
-            {
-                "id": "r2",
-                "question": "question beta raft",
-                "answer": "beta",
-                "contexts": list(reversed(raft_contexts)),
-                "evidence_doc_ids": ["beta"],
-            },
+                **row,
+                "contexts": raft_contexts if row["answer"] == "alpha" else list(reversed(raft_contexts)),
+                "evidence_doc_ids": [row["answer"]],
+            }
+            for row in source_train
         ],
     )
     write_jsonl(
         raft_validation,
         [
             {
-                "id": "rv",
-                "question": "question alpha raft validation",
-                "answer": "alpha",
+                **row,
                 "contexts": raft_contexts,
                 "evidence_doc_ids": ["alpha"],
             }
+            for row in source_validation
         ],
     )
 
@@ -224,6 +226,43 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
         )
         assert (adapters[mode] / "adapter_model.safetensors").is_file()
 
+    adapter_manifests = {
+        mode: json.loads(
+            (adapter / "raglab_adapter_manifest.json").read_text(encoding="utf-8")
+        )
+        for mode, adapter in adapters.items()
+    }
+    assert (
+        adapter_manifests["sft"]["training_source_fingerprint"]
+        == adapter_manifests["raft"]["training_source_fingerprint"]
+    )
+    assert (
+        adapter_manifests["sft"]["validation_source_fingerprint"]
+        == adapter_manifests["raft"]["validation_source_fingerprint"]
+    )
+    assert (
+        adapter_manifests["sft"]["training_control_sha256"]
+        == adapter_manifests["raft"]["training_control_sha256"]
+    )
+    for field in ("model", "training_prompt", "chat_template_kwargs", "training_controls"):
+        assert adapter_manifests["sft"][field] == adapter_manifests["raft"][field]
+    assert (
+        adapter_manifests["sft"]["training_dataset_fingerprint"]
+        != adapter_manifests["raft"]["training_dataset_fingerprint"]
+    )
+    assert (
+        adapter_manifests["sft"]["adapter_artifact_sha256"]
+        != adapter_manifests["raft"]["adapter_artifact_sha256"]
+    )
+    for mode, adapter_manifest in adapter_manifests.items():
+        validate_artifact_schema(adapter_manifest, "adapter-manifest-v3.schema.json")
+        training_manifest = json.loads(
+            (tmp_path / f"output-{mode}" / "training_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validate_artifact_schema(training_manifest, "training-manifest-v3.schema.json")
+
     documents = load_documents(documents_path)
     examples = load_eval(eval_path)
     model_config = yaml.safe_load(model_config_path.read_text(encoding="utf-8"))
@@ -254,6 +293,14 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
     summary = runner.run()
     assert set(summary["recipes"]) == {"base", "rag", "sft-rag", "raft-rag"}
     assert summary["provenance"]["verified"] is True
+    assert summary["provenance"]["training_controls_matched"] is True
+    assert (tmp_path / "benchmark" / "summary.json").is_file()
+    assert (tmp_path / "benchmark" / "report.md").is_file()
+    assert (tmp_path / "benchmark" / "predictions.jsonl").is_file()
+    validate_artifact_schema(summary, "benchmark-summary-v3.schema.json")
     for recipe in summary["recipes"].values():
+        assert recipe["metrics"]["exact_match"] is not None
+        assert recipe["metrics"]["token_f1"] is not None
         assert recipe["metrics"]["peak_allocated_vram_gb"] is not None
         assert recipe["metrics"]["peak_reserved_vram_gb"] is not None
+        assert Path(recipe["predictions"]).is_file()
