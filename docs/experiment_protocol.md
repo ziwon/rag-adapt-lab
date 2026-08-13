@@ -40,7 +40,7 @@ Run all recipes in one `raglab benchmark` invocation where possible. The runner 
 
 ## Statistical interpretation
 
-Use paired deltas because every recipe answers the same held-out examples. The standard report includes Base → RAG, RAG → SFT + RAG, RAG → RAFT + RAG, and SFT + RAG → RAFT + RAG. Exact match and token F1 use seeded paired percentile-bootstrap 95% confidence intervals. A difference is marked statistically supported only when the interval excludes zero.
+Use paired deltas because every recipe answers the same held-out examples. The standard report includes Base → RAG, RAG → SFT + RAG, RAG → RAFT + RAG, and SFT + RAG → RAFT + RAG. Exact match and token F1 use seeded paired percentile-bootstrap 95% confidence intervals. A difference is marked statistically supported only when the interval excludes zero and the comparison remains decision-eligible. Judge comparisons additionally require the configured minimum paired coverage and sample count; report paired numeric examples as `n/N`, coverage, and dropped IDs/count. Never infer a resolved judge result from a small successful subset.
 
 The interval describes uncertainty over the sampled evaluation examples; it does not establish external validity for another domain, corpus, or retrieval distribution. LLM-judge results remain secondary to deterministic metrics and should be calibrated against human ratings before driving a high-stakes conclusion.
 
@@ -64,18 +64,32 @@ For synthetic data generation, record the source model, prompt version, filterin
 
 The local runner performs an unmeasured warm-up and synchronizes CUDA around transfers and generation. Persist retrieval, prompt-build, chat-template, tokenization, device-transfer, model-generate, decode, inference-E2E, deterministic-scoring, and judge latency separately. Judge latency is never part of user-facing inference latency. Report allocated and reserved CUDA peaks, output/total-token throughput, batch size, and sequential/batched mode. Repeat timing runs on an idle machine when small differences matter.
 
-## Adapter provenance gate
+## Adapter provenance and optimization-control gate
 
-Schema-v2 adapter manifests are mandatory by default. Before loading, validate the immutable base,
+Schema-v3 adapter manifests are mandatory by default. Before loading, validate the immutable base,
 expected SFT/RAFT mode, prompt name/version/hash, chat-template arguments, held-out file hash, and
 recomputed adapter artifact hash. Distinct SFT and RAFT conditions must not resolve to the same
-path or artifact hash. `--allow-unverified-adapter` is only a legacy escape hatch and invalidates a
-clean causal interpretation; its warning must remain in both machine and Markdown reports.
+path or artifact hash. Their source-partition fingerprints and normalized training-control hashes
+must match. If controls differ, list every mismatched field and fail closed. The separate
+`--allow-unmatched-training-controls` override labels the comparison confounded and disables
+decision language. `--allow-unverified-adapter` remains only a legacy escape hatch; both overrides
+must remain visible in machine and Markdown reports.
 
 ## Thinking-mode protocol
 
 The standard concise-QA condition disables Qwen3 thinking and uses greedy decoding with 64 new
 tokens. A thinking-enabled run is a different experimental condition: use sampled thinking
 decoding, reserve enough output tokens, persist reasoning and answer tokens separately, and score
-only the parsed final answer. Never place thinking and non-thinking recipes in one adaptation-only
-comparison.
+only the parsed final answer. Split generated token IDs at the tokenizer-resolved final
+`</think>` boundary before decoding. A missing, repeated, ambiguous, or answer-empty boundary is a
+protocol failure; any thinking boundary in non-thinking mode is also a failure. Never place
+thinking and non-thinking recipes in one adaptation-only comparison.
+
+## Static validation levels
+
+`--plan-only` validates structural inputs and writes `validation_level: structural`; it explicitly
+records that adapter provenance and scorer configuration are not validated. `--dry-run` performs
+all static protocol checks, including artifact hashes, modes, prompt/evaluation/source identity,
+matched training controls, duplicate adapters, scorer/judge syntax, output paths, and JSON Schema
+contracts. It writes `validation_level: static-protocol` and does not load weights, initialize
+CUDA, run generation, or contact a judge endpoint.

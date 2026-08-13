@@ -42,7 +42,9 @@ The included Qwen configs are examples, not hard requirements. Their Hub revisio
 The default Qwen3 condition is deliberately concise and non-thinking: every shipped Qwen3 config
 sets `chat_template_kwargs.enable_thinking: false`, `do_sample: false`, and
 `max_new_tokens: 64`. Thinking mode is supported only as a separately labeled sampled condition;
-its reasoning and final answer are parsed and counted independently, and EM/F1 use the final answer.
+its generated token IDs are split at the tokenizer-resolved `</think>` special token before either
+segment is decoded. Reasoning and final-answer counts therefore come from the original IDs, and
+EM/F1 use only the final answer. Missing, repeated, or unexpected thinking boundaries fail closed.
 
 ## Repository layout
 
@@ -177,7 +179,7 @@ raglab prepare-raft \
   --seed 42
 ```
 
-`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. With `--validation-output`, raw QA is group-split first and separate retrievers mine each partition. `shared-corpus` permits document reuse while keeping questions disjoint; `document-disjoint` partitions positives and distractor pools so no document crosses the boundary. The emitted manifest records group counts, fingerprints, overlap counts, corpus policy, mining scope, and seed. Relevance labels remain metadata and are never rendered into the prompt. `--output`, `--validation-output`, and the default or explicit `--manifest-output` must resolve to three distinct paths.
+`random` remains available for ablations. `bm25-hard-negative` retrieves the highest-ranked non-relevant documents and mixes them with the positive evidence. Positive IDs are always removed before distractor selection. With `--validation-output`, raw QA is group-split first and separate retrievers mine each partition. `shared-corpus` permits document reuse while keeping questions disjoint; `document-disjoint` partitions positives and distractor pools so no document crosses the boundary. The emitted, runtime-validated `raft-partition-manifest` records group counts, fingerprints, overlap counts, corpus policy, mining scope, and seed. Relevance labels remain metadata and are never rendered into the prompt. `--output`, `--validation-output`, and the default or explicit `--manifest-output` must resolve to three distinct paths.
 
 ### 5. Run retrieval evaluation
 
@@ -209,7 +211,7 @@ raglab train \
   --held-out-eval examples/demo/eval.jsonl
 ```
 
-The SFT recipe above intentionally consumes the same mined rows as RAFT: SFT mode uses their IDs, questions, and answers while ignoring contexts, which preserves matched source partitions. Training configs default to a deterministic group-aware validation split. Supplying the explicit matched partitions emitted by `prepare-raft` with `--validation-file` is preferred. Within a training config, `split.validation_ratio` and `split.seed` take precedence over the legacy top-level `validation_split_ratio` and `seed`; explicit train/validation files are still checked against every configured grouping field. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v3 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, representation-independent source-partition fingerprints, full dataset fingerprints, held-out hash, training-config hash, split policy/audit, and adapter artifact hash. When both adapted conditions are benchmarked, their source-partition fingerprints must match.
+The SFT recipe above intentionally consumes the same mined rows as RAFT: SFT mode uses their IDs, questions, and answers while ignoring contexts, which preserves matched source partitions. Training configs default to a deterministic group-aware validation split. Supplying the explicit matched partitions emitted by `prepare-raft` with `--validation-file` is preferred. Within a training config, `split.validation_ratio` and `split.seed` take precedence over the legacy top-level `validation_split_ratio` and `seed`; explicit train/validation files are still checked against every configured grouping field. `--held-out-eval` is mandatory for verifiable adapters: it is used only for overlap and hash checks and is never passed to the trainer. The trainer evaluates at the configured interval, supports early stopping, reloads the best checkpoint, and writes schema-v3 training and adapter manifests. These include the base revision, adaptation mode, prompt identity/hash, effective chat-template args, representation-independent source-partition fingerprints, full dataset fingerprints, held-out hash, training-config hash, split policy/audit, normalized training controls and their digest, and adapter artifact hash. The controls cover LoRA/QLoRA, optimizer/scheduler, epochs, effective batch size, sequence length, warmup, checkpoint selection, precision/quantization, and seeds while excluding paths, tracking, and representation labels. When both adapted conditions are benchmarked, their source-partition and training-control fingerprints must match.
 
 SFT and RAFT use exactly the same versioned `rag-user-prompt` builder. SFT supplies no documents; RAFT supplies positive evidence and distractors. For TRL 0.24.0, the tokenizer chat template is explicitly rendered with the model's effective kwargs before creating plain prompt/completion records. `completion_only_loss: true` therefore masks the entire prompt (including retrieved documents), leaving only assistant completion tokens as targets. Oracle relevance flags are excluded.
 
@@ -242,13 +244,26 @@ target answers—must match. A legacy adapter can be run only with `--allow-unve
 CLI emits a warning and both
 `summary.json` and `report.md` label the experiment as unverified.
 
+Training-control mismatches are a separate confound and fail closed by default. The explicit
+`--allow-unmatched-training-controls` override retains raw results but marks provenance and the
+SFT → RAFT comparison as confounded, lists the differing normalized fields, and suppresses causal
+or decision-oriented language.
+
 Outputs include:
 
 - `predictions/<recipe>.jsonl` and combined `predictions.jsonl`, including retrieved IDs/scores, every inference stage, separate reasoning/answer token counts, deterministic scoring time, judge time/status, and all per-example scores;
-- `summary.json`, containing aggregate metrics, configuration/input hashes, and paired percentile-bootstrap intervals;
-- `report.md`, containing the recipe table, retrieval quality, decision-oriented comparisons, latency, throughput, and peak GPU VRAM.
+- `summary.json`, a runtime-validated `benchmark-summary` v3 artifact containing aggregate metrics,
+  configuration/input hashes, judge coverage, and paired percentile-bootstrap intervals;
+- `report.md`, containing distinct deterministic/judge columns, retrieval quality, coverage-aware
+  comparisons, latency, throughput, and peak GPU VRAM.
 
-Use `--dry-run --plan-output outputs/benchmark-plan.json` to validate and save a plan without loading a model. W&B logging is opt-in with `--tracking-backend wandb`; the default is local-only.
+Use `--plan-only --plan-output outputs/benchmark-plan.json` for structural planning when adapters
+do not exist yet. Use `--dry-run --plan-output outputs/static-validation.json` for every static
+protocol check: adapter existence/schema/hash/mode, prompt and held-out identity, matched source
+populations and training controls, duplicate adapters, scorer/judge syntax, and output paths.
+Neither mode loads model weights or initializes CUDA; `--dry-run` also never contacts a judge
+endpoint. Their machine-readable validation levels are `structural` and `static-protocol`. W&B
+logging is opt-in with `--tracking-backend wandb`; the default is local-only.
 
 The default scorer combines deterministic `reference_overlap` with explicitly labeled lexical groundedness/unsupported-claim heuristics. An optional versioned LLM judge can target any OpenAI-compatible endpoint:
 
@@ -257,7 +272,7 @@ cp configs/scorers/openai-compatible.example.yaml configs/scorers/local-judge.ya
 export JUDGE_API_KEY=local
 ```
 
-The judge treats the answer and retrieved text as untrusted serialized data under a separate system rubric. Connect/read timeouts, bounded retry/backoff, streamed `max_response_bytes` enforcement, server-side `max_completion_tokens`, structured-output `max_rationale_characters`, concurrency, and strict/non-strict behavior are configurable. The persistent deterministic cache uses transactional SQLite and defaults to `.cache/raglab/judge-cache.sqlite3`; choose a new path rather than reusing a legacy JSON cache. Non-strict failures are isolated per example and never remove EM/F1; optional comparison metrics are calculated only where both recipes have numeric scores for the same example IDs. Reports include judge coverage and failure rate. The Python API also accepts `CallableJudgeBackend`. Set `mode: disabled` to disable plugin scores while retaining EM/F1.
+The judge treats the answer and retrieved text as untrusted serialized data under a separate system rubric. Connect/read timeouts, bounded retry/backoff, streamed `max_response_bytes` enforcement, server-side `max_completion_tokens`, structured-output `max_rationale_characters`, concurrency, and strict/non-strict behavior are configurable. The persistent deterministic cache uses transactional SQLite and defaults to `.cache/raglab/judge-cache.sqlite3`; choose a new path rather than reusing a legacy JSON cache. Non-strict failures are isolated per example and never remove EM/F1. Per-metric recipe aggregates record total/numeric examples, successes/failures, coverage, and cache hits/misses. Paired judge comparisons record baseline/candidate numeric counts, paired `n/N`, coverage, and dropped IDs. The defaults `minimum_metric_coverage: 0.8` and `minimum_paired_examples: 30` suppress statistical decision language when evidence is too sparse, even if the available-subset interval excludes zero. The Python API also accepts `CallableJudgeBackend`. Set `mode: disabled` to disable plugin scores while retaining EM/F1; deterministic reference overlap is never relabeled as judge correctness.
 
 ### Public Hugging Face smoke experiment
 
@@ -434,15 +449,22 @@ Current limitations:
 - the stock trainer selects from metrics emitted by TRL/Transformers (normally `eval_loss`); custom task metrics require extending the trainer;
 - confidence intervals are unadjusted for multiple comparisons.
 - the stock answer-only trainer fails closed for thinking-enabled adapter training; thinking-enabled base/RAG inference and externally trained schema-v3 adapters remain evaluable as separate conditions;
-- the GPU workflow requires a compatible self-hosted runner and is not evidence that a particular local checkout has executed CUDA unless that job result is available;
+- the hosted GPU workflow requires a compatible self-hosted runner; validation evidence for the
+  current revision is recorded separately in [validation status](docs/validation_status.md);
 
 ## Validation layers
 
-- **Unit tests:** core/dev dependencies; fast orchestration, failure, and statistical tests.
-- **CPU integration:** pinned real BM25, Datasets, Transformers, TRL, PEFT manifest contracts, report generation, and Compose parsing without model downloads.
-- **GPU integration:** scheduled/manual self-hosted workflow that constructs a local tiny model, trains distinct SFT/RAFT LoRA adapters, reloads them, generates, captures CUDA memory, and executes one benchmark matrix.
+- **Unit tests:** core/dev dependencies; token-level protocol, provenance, schema, CLI failure, and
+  coverage-aware statistical tests.
+- **CPU integration:** pinned real BM25, Datasets, Transformers, TRL, PEFT manifest contracts,
+  report generation, and Compose parsing without model downloads.
+- **GPU integration:** constructs a local tiny model, trains matched-source SFT/RAFT LoRA adapters,
+  validates distinct artifacts and strict manifests, reloads them, executes all four recipes,
+  captures allocated/reserved CUDA memory, and validates report artifacts.
 
-Passing only the unit job is not described as full validation. See
+Passing only the unit job is not described as full validation. The exact executed commands,
+hardware, limitations, and current result are in [validation status](docs/validation_status.md).
+See
 [schema-v3 migration notes](docs/migration_v3.md) for matched adaptation populations, prompt provenance, and judge-cache changes. The historical [schema-v2 notes](docs/migration_v2.md) remain available.
 
 Out of scope for v0.2:
