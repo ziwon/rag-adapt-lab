@@ -28,6 +28,7 @@ from rag_adapt_lab.provenance import (
     file_sha256,
 )
 
+from .controls import normalize_training_controls, training_control_sha256
 from .data import (
     TrainingSplit,
     configured_training_split,
@@ -69,20 +70,37 @@ def build_sft_config_values(
     values: dict[str, Any] = {
         "output_dir": str(output_dir),
         "learning_rate": float(training_cfg.get("learning_rate", 2e-4)),
+        "optim": str(training_cfg.get("optim", "adamw_torch")),
+        "optim_args": str(training_cfg.get("optim_args", "")),
+        "adam_beta1": float(training_cfg.get("adam_beta1", 0.9)),
+        "adam_beta2": float(training_cfg.get("adam_beta2", 0.999)),
+        "adam_epsilon": float(training_cfg.get("adam_epsilon", 1e-8)),
+        "lr_scheduler_type": str(training_cfg.get("lr_scheduler_type", "linear")),
+        "lr_scheduler_kwargs": dict(training_cfg.get("lr_scheduler_kwargs", {})),
+        "weight_decay": float(training_cfg.get("weight_decay", 0.0)),
+        "max_grad_norm": float(training_cfg.get("max_grad_norm", 1.0)),
         "num_train_epochs": float(training_cfg.get("num_train_epochs", 2)),
+        "max_steps": int(training_cfg.get("max_steps", -1)),
         "per_device_train_batch_size": int(training_cfg.get("per_device_train_batch_size", 1)),
         "per_device_eval_batch_size": int(training_cfg.get("per_device_eval_batch_size", 1)),
         "gradient_accumulation_steps": int(training_cfg.get("gradient_accumulation_steps", 16)),
         "max_length": int(training_cfg.get("max_seq_length", 2048)),
         "warmup_ratio": float(training_cfg.get("warmup_ratio", 0.03)),
+        "warmup_steps": int(training_cfg.get("warmup_steps", 0)),
         "logging_steps": int(training_cfg.get("logging_steps", 5)),
         "save_strategy": eval_strategy if has_validation else "steps",
         "save_steps": save_steps,
         "save_total_limit": int(training_cfg.get("save_total_limit", 2)),
         "gradient_checkpointing": bool(training_cfg.get("gradient_checkpointing", True)),
+        "gradient_checkpointing_kwargs": dict(
+            training_cfg.get("gradient_checkpointing_kwargs", {})
+        ),
         "bf16": bool(training_cfg.get("bf16", True)),
+        "fp16": bool(training_cfg.get("fp16", False)),
+        "tf32": bool(training_cfg.get("tf32", False)),
         "seed": int(training_cfg.get("seed", 42)),
-        "data_seed": int(training_cfg.get("seed", 42)),
+        "data_seed": int(training_cfg.get("data_seed", training_cfg.get("seed", 42))),
+        "label_smoothing_factor": float(training_cfg.get("label_smoothing_factor", 0.0)),
         "report_to": ["wandb"] if report_to_wandb else [],
         "completion_only_loss": True,
         "include_tokens_per_second": True,
@@ -313,11 +331,15 @@ def train_qlora(
         mode=mode,
         use_chat_template=use_chat_template,
     )
-    compute_dtype = (
-        torch.bfloat16
-        if training_cfg.get("bnb_4bit_compute_dtype") == "bfloat16"
-        else torch.float16
-    )
+    quantization_dtypes = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    compute_dtype_name = str(training_cfg.get("bnb_4bit_compute_dtype", "bfloat16"))
+    if compute_dtype_name not in quantization_dtypes:
+        raise ValueError("bnb_4bit_compute_dtype must be bfloat16, float16, or float32")
+    compute_dtype = quantization_dtypes[compute_dtype_name]
     quant_cfg = None
     if bool(training_cfg.get("load_in_4bit", True)):
         quant_cfg = BitsAndBytesConfig(
@@ -347,6 +369,11 @@ def train_qlora(
         )
     train_dataset = Dataset.from_list(train_records)
     eval_dataset = Dataset.from_list(validation_records) if validation_records else None
+    training_controls = normalize_training_controls(
+        training_cfg,
+        has_validation=eval_dataset is not None,
+    )
+    control_sha256 = training_control_sha256(training_controls)
 
     dtype_by_name = {
         "bfloat16": torch.bfloat16,
@@ -370,7 +397,7 @@ def train_qlora(
         r=int(training_cfg.get("lora_r", 16)),
         lora_alpha=int(training_cfg.get("lora_alpha", 32)),
         lora_dropout=float(training_cfg.get("lora_dropout", 0.05)),
-        bias="none",
+        bias=str(training_cfg.get("lora_bias", "none")),
         task_type="CAUSAL_LM",
         target_modules=training_cfg.get("target_modules", "all-linear"),
     )
@@ -424,6 +451,7 @@ def train_qlora(
     adapter_artifact_sha256 = artifact_sha256(adapter_path)
 
     manifest = {
+        "schema_name": "raglab-training-manifest",
         "schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
         "recipe": recipe.get("name"),
         "mode": mode,
@@ -433,6 +461,8 @@ def train_qlora(
         "training_prompt": prompt_provenance,
         "training_config": training_cfg,
         "training_configuration_sha256": training_configuration_sha256,
+        "training_controls": training_controls,
+        "training_control_sha256": control_sha256,
         "training_dataset_fingerprint": train_fingerprint,
         "validation_dataset_fingerprint": validation_fingerprint,
         "training_source_fingerprint": training_source_fingerprint,
@@ -473,32 +503,32 @@ def train_qlora(
         "adapter_path": str(adapter_path),
         "adapter_artifact_sha256": adapter_artifact_sha256,
     }
+    adapter_manifest = {
+        "schema_name": "raglab-adapter-manifest",
+        "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
+        "model": {"model_id": model_id, "revision": model_revision},
+        "recipe": recipe.get("name"),
+        "adaptation_mode": mode,
+        "training_prompt": prompt_provenance,
+        "chat_template_kwargs": chat_template_kwargs,
+        "training_dataset_fingerprint": train_fingerprint,
+        "validation_dataset_fingerprint": validation_fingerprint,
+        "training_source_fingerprint": training_source_fingerprint,
+        "validation_source_fingerprint": validation_source_fingerprint,
+        "held_out_evaluation_sha256": held_out_evaluation_sha256,
+        "training_configuration_sha256": training_configuration_sha256,
+        "training_controls": training_controls,
+        "training_control_sha256": control_sha256,
+        "adapter_artifact_sha256": adapter_artifact_sha256,
+        "best_checkpoint": trainer.state.best_model_checkpoint,
+        "best_validation_metric": trainer.state.best_metric,
+    }
     (output_dir / "training_manifest.json").write_text(
         json.dumps(manifest, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
     (adapter_path / ADAPTER_MANIFEST_FILENAME).write_text(
-        json.dumps(
-            {
-                "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
-                "model": {"model_id": model_id, "revision": model_revision},
-                "recipe": recipe.get("name"),
-                "adaptation_mode": mode,
-                "training_prompt": prompt_provenance,
-                "chat_template_kwargs": chat_template_kwargs,
-                "training_dataset_fingerprint": train_fingerprint,
-                "validation_dataset_fingerprint": validation_fingerprint,
-                "training_source_fingerprint": training_source_fingerprint,
-                "validation_source_fingerprint": validation_source_fingerprint,
-                "held_out_evaluation_sha256": held_out_evaluation_sha256,
-                "training_configuration_sha256": training_configuration_sha256,
-                "adapter_artifact_sha256": adapter_artifact_sha256,
-                "best_checkpoint": trainer.state.best_model_checkpoint,
-                "best_validation_metric": trainer.state.best_metric,
-            },
-            indent=2,
-            default=str,
-        )
+        json.dumps(adapter_manifest, indent=2, default=str)
         + "\n",
         encoding="utf-8",
     )

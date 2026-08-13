@@ -14,6 +14,61 @@ BENCHMARK_SCHEMA_VERSION = 3
 
 AdaptationMode = Literal["sft", "raft"]
 _SHA256_HEX_LENGTH = 64
+_REQUIRED_TRAINING_CONTROL_PATHS = (
+    "adaptation_method",
+    "adapter.rank",
+    "adapter.alpha",
+    "adapter.dropout",
+    "adapter.target_modules",
+    "adapter.bias",
+    "adapter.task_type",
+    "optimization.learning_rate",
+    "optimization.optimizer",
+    "optimization.optimizer_args",
+    "optimization.adam_beta1",
+    "optimization.adam_beta2",
+    "optimization.adam_epsilon",
+    "optimization.scheduler",
+    "optimization.scheduler_kwargs",
+    "optimization.weight_decay",
+    "optimization.max_grad_norm",
+    "optimization.num_train_epochs",
+    "optimization.max_steps",
+    "batching.per_device_train_batch_size",
+    "batching.per_device_eval_batch_size",
+    "batching.gradient_accumulation_steps",
+    "batching.effective_batch_size",
+    "batching.effective_batch_size_per_device",
+    "sequence.max_length",
+    "warmup.ratio",
+    "warmup.steps",
+    "gradient_checkpointing.enabled",
+    "gradient_checkpointing.kwargs",
+    "precision.bf16",
+    "precision.fp16",
+    "precision.tf32",
+    "quantization.load_in_4bit",
+    "quantization.type",
+    "quantization.double_quantization",
+    "quantization.compute_dtype",
+    "seeds.training",
+    "seeds.data",
+    "loss.completion_only",
+    "loss.label_smoothing_factor",
+    "checkpoint_selection.validation_enabled",
+    "checkpoint_selection.evaluation_strategy",
+    "checkpoint_selection.evaluation_steps",
+    "checkpoint_selection.save_strategy",
+    "checkpoint_selection.save_steps",
+    "checkpoint_selection.save_total_limit",
+    "checkpoint_selection.load_best_model_at_end",
+    "checkpoint_selection.metric_for_best_model",
+    "checkpoint_selection.greater_is_better",
+    "checkpoint_selection.early_stopping_metric",
+    "checkpoint_selection.early_stopping_patience",
+    "checkpoint_selection.early_stopping_threshold",
+    "checkpoint_selection.best_model_selection_policy",
+)
 
 
 def file_sha256(path: str | Path) -> str:
@@ -67,6 +122,8 @@ class AdapterVerification:
     adaptation_mode: str | None
     training_source_fingerprint: str | None = None
     validation_source_fingerprint: str | None = None
+    training_control_sha256: str | None = None
+    training_controls: Mapping[str, Any] | None = None
     warnings: tuple[str, ...] = ()
     manifest: Mapping[str, Any] | None = None
 
@@ -78,9 +135,16 @@ class AdapterVerification:
             "adaptation_mode": self.adaptation_mode,
             "training_source_fingerprint": self.training_source_fingerprint,
             "validation_source_fingerprint": self.validation_source_fingerprint,
+            "training_control_sha256": self.training_control_sha256,
+            "training_controls": dict(self.training_controls)
+            if self.training_controls is not None
+            else None,
             "warnings": list(self.warnings),
             "manifest_schema_version": (
                 self.manifest.get("schema_version") if self.manifest is not None else None
+            ),
+            "manifest_schema_name": (
+                self.manifest.get("schema_name") if self.manifest is not None else None
             ),
         }
 
@@ -97,6 +161,50 @@ def _required_sha256(manifest: Mapping[str, Any], field: str) -> str:
     if len(value) != _SHA256_HEX_LENGTH or any(character not in "0123456789abcdef" for character in value):
         raise ValueError(f"Adapter manifest field {field!r} must be a lowercase SHA-256 hex digest")
     return value
+
+
+def _validate_training_controls(controls: Mapping[str, Any]) -> None:
+    missing: list[str] = []
+    for path in _REQUIRED_TRAINING_CONTROL_PATHS:
+        value: Any = controls
+        for part in path.split("."):
+            if not isinstance(value, Mapping) or part not in value:
+                missing.append(path)
+                break
+            value = value[part]
+    if missing:
+        raise ValueError(
+            "Adapter training_controls is missing normalized fields: "
+            + ", ".join(missing)
+        )
+    if controls["adaptation_method"] not in {"lora", "qlora"}:
+        raise ValueError("Adapter training_controls has an invalid adaptation_method")
+    try:
+        adapter = controls["adapter"]
+        optimization = controls["optimization"]
+        batching = controls["batching"]
+        sequence = controls["sequence"]
+        rank = int(adapter["rank"])
+        alpha = int(adapter["alpha"])
+        dropout = float(adapter["dropout"])
+        learning_rate = float(optimization["learning_rate"])
+        per_device_batch = int(batching["per_device_train_batch_size"])
+        accumulation = int(batching["gradient_accumulation_steps"])
+        effective_batch = int(batching["effective_batch_size"])
+        effective_batch_per_device = int(batching["effective_batch_size_per_device"])
+        max_length = int(sequence["max_length"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Adapter training_controls contains invalid normalized values") from exc
+    if rank < 1 or alpha < 1 or not 0.0 <= dropout <= 1.0:
+        raise ValueError("Adapter training_controls contains invalid LoRA controls")
+    if learning_rate <= 0 or per_device_batch < 1 or accumulation < 1 or max_length < 1:
+        raise ValueError("Adapter training_controls contains invalid optimization controls")
+    expected_batch = per_device_batch * accumulation
+    if effective_batch != expected_batch or effective_batch_per_device != expected_batch:
+        raise ValueError(
+            "Adapter training_controls effective_batch_size does not match batch size "
+            "and gradient accumulation"
+        )
 
 
 def _verify_adapter_manifest(
@@ -155,6 +263,7 @@ def _verify_adapter_manifest(
         "validation_source_fingerprint",
         "held_out_evaluation_sha256",
         "training_configuration_sha256",
+        "training_control_sha256",
         "adapter_artifact_sha256",
     ):
         _required_sha256(manifest, field)
@@ -164,6 +273,12 @@ def _verify_adapter_manifest(
     if expected_prompt is not None and "chat_template_kwargs" in expected_prompt:
         if dict(chat_kwargs) != dict(expected_prompt["chat_template_kwargs"]):
             raise ValueError("Adapter chat-template arguments do not match the benchmark contract")
+    training_controls = manifest.get("training_controls")
+    if not isinstance(training_controls, Mapping) or not training_controls:
+        raise ValueError("Adapter manifest field 'training_controls' must be a non-empty mapping")
+    _validate_training_controls(training_controls)
+    if canonical_sha256(training_controls) != manifest["training_control_sha256"]:
+        raise ValueError("Adapter training-control hash does not match normalized controls")
 
     recorded_eval_hash = manifest["held_out_evaluation_sha256"]
     if (
@@ -188,6 +303,8 @@ def _verify_adapter_manifest(
         adaptation_mode=mode,
         training_source_fingerprint=manifest["training_source_fingerprint"],
         validation_source_fingerprint=manifest["validation_source_fingerprint"],
+        training_control_sha256=manifest["training_control_sha256"],
+        training_controls=training_controls,
         manifest=manifest,
     )
 

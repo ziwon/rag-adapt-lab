@@ -8,7 +8,9 @@ from rag_adapt_lab.generation.transformers import validate_adapter_identity
 from rag_adapt_lab.provenance import (
     ADAPTER_MANIFEST_SCHEMA_VERSION,
     artifact_sha256,
+    canonical_sha256,
 )
+from rag_adapt_lab.training.controls import normalize_training_controls
 
 MODEL_ID = "test/model"
 MODEL_REVISION = "a" * 40
@@ -33,9 +35,12 @@ def write_adapter_manifest(
     prompt = rag_prompt_provenance()
     if prompt_version is not None:
         prompt["version"] = prompt_version
+    training_controls = normalize_training_controls({}, has_validation=True)
     manifest: dict[str, object] = {
+        "schema_name": "raglab-adapter-manifest",
         "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
         "model": {"model_id": MODEL_ID, "revision": revision},
+        "recipe": f"test-{mode}",
         "adaptation_mode": mode,
         "training_prompt": prompt,
         "chat_template_kwargs": {},
@@ -45,7 +50,11 @@ def write_adapter_manifest(
         "validation_source_fingerprint": "5" * 64,
         "held_out_evaluation_sha256": eval_hash,
         "training_configuration_sha256": "3" * 64,
+        "training_controls": training_controls,
+        "training_control_sha256": canonical_sha256(training_controls),
         "adapter_artifact_sha256": artifact_sha256(path),
+        "best_checkpoint": None,
+        "best_validation_metric": None,
     }
     write_json(path / "raglab_adapter_manifest.json", manifest)
     return manifest

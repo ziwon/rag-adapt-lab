@@ -9,11 +9,13 @@ from rag_adapt_lab.generation.prompts import rag_prompt_provenance
 from rag_adapt_lab.provenance import (
     ADAPTER_MANIFEST_SCHEMA_VERSION,
     artifact_sha256,
+    canonical_sha256,
     file_sha256,
     validate_adapter_provenance,
 )
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.factory import create_retriever
+from rag_adapt_lab.training.controls import normalize_training_controls
 from rag_adapt_lab.training.data import (
     prompt_completion_records,
     render_chat_prompt_completions,
@@ -96,9 +98,12 @@ def test_real_cpu_dependency_contracts(tmp_path: Path) -> None:
         json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
     )
     (adapter / "adapter_model.safetensors").write_bytes(b"real-artifact-bytes")
+    training_controls = normalize_training_controls({}, has_validation=True)
     manifest = {
+        "schema_name": "raglab-adapter-manifest",
         "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
         "model": {"model_id": "test/model", "revision": "a" * 40},
+        "recipe": "test-sft",
         "adaptation_mode": "sft",
         "training_prompt": rag_prompt_provenance(),
         "chat_template_kwargs": {},
@@ -108,7 +113,11 @@ def test_real_cpu_dependency_contracts(tmp_path: Path) -> None:
         "validation_source_fingerprint": "5" * 64,
         "held_out_evaluation_sha256": file_sha256(evaluation),
         "training_configuration_sha256": "3" * 64,
+        "training_controls": training_controls,
+        "training_control_sha256": canonical_sha256(training_controls),
         "adapter_artifact_sha256": artifact_sha256(adapter),
+        "best_checkpoint": None,
+        "best_validation_metric": None,
     }
     (adapter / "raglab_adapter_manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8"

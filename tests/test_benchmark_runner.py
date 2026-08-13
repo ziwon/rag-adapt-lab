@@ -12,10 +12,14 @@ from rag_adapt_lab.provenance import (
     ADAPTER_MANIFEST_SCHEMA_VERSION,
     BENCHMARK_SCHEMA_VERSION,
     artifact_sha256,
+    canonical_sha256,
     file_sha256,
 )
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
+from rag_adapt_lab.training.controls import normalize_training_controls
+
+TEST_TRAINING_CONTROLS = normalize_training_controls({}, has_validation=True)
 
 
 class StaticRetriever(Retriever):
@@ -129,6 +133,14 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
     assert summary["retrieval_metrics"]["retrieval/evaluated"] == len(examples)
     assert "base->rag" in summary["comparisons"]
     assert "rag->raft-rag" in summary["comparisons"]
+    assert (
+        summary["comparisons"]["rag->raft-rag"]["token_f1"]["status"]
+        == "unverified_adapter_provenance"
+    )
+    assert (
+        summary["comparisons"]["rag->raft-rag"]["token_f1"]["decision_eligible"]
+        is False
+    )
     assert (tmp_path / "summary.json").is_file()
     assert (tmp_path / "report.md").is_file()
     assert "RAFT + RAG" in (tmp_path / "report.md").read_text(encoding="utf-8")
@@ -191,8 +203,10 @@ def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path
         )
         (adapter / "adapter_model.safetensors").write_bytes(b"identical-weights")
         manifest = {
+            "schema_name": "raglab-adapter-manifest",
             "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
             "model": {"model_id": "test/model", "revision": "0" * 40},
+            "recipe": f"test-{mode}",
             "adaptation_mode": mode,
             "training_prompt": rag_prompt_provenance(),
             "chat_template_kwargs": {},
@@ -202,7 +216,11 @@ def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path
             "validation_source_fingerprint": "5" * 64,
             "held_out_evaluation_sha256": file_sha256(eval_path),
             "training_configuration_sha256": "3" * 64,
+            "training_controls": TEST_TRAINING_CONTROLS,
+            "training_control_sha256": canonical_sha256(TEST_TRAINING_CONTROLS),
             "adapter_artifact_sha256": artifact_sha256(adapter),
+            "best_checkpoint": None,
+            "best_validation_metric": None,
         }
         (adapter / "raglab_adapter_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8"
@@ -270,8 +288,10 @@ def test_benchmark_rejects_mismatched_sft_and_raft_source_partitions(
         )
         (adapter / "adapter_model.safetensors").write_bytes(mode.encode())
         manifest = {
+            "schema_name": "raglab-adapter-manifest",
             "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,
             "model": {"model_id": "test/model", "revision": "0" * 40},
+            "recipe": f"test-{mode}",
             "adaptation_mode": mode,
             "training_prompt": rag_prompt_provenance(),
             "chat_template_kwargs": {},
@@ -281,7 +301,11 @@ def test_benchmark_rejects_mismatched_sft_and_raft_source_partitions(
             "validation_source_fingerprint": "5" * 64,
             "held_out_evaluation_sha256": file_sha256(eval_path),
             "training_configuration_sha256": "3" * 64,
+            "training_controls": TEST_TRAINING_CONTROLS,
+            "training_control_sha256": canonical_sha256(TEST_TRAINING_CONTROLS),
             "adapter_artifact_sha256": artifact_sha256(adapter),
+            "best_checkpoint": None,
+            "best_validation_metric": None,
         }
         (adapter / "raglab_adapter_manifest.json").write_text(
             json.dumps(manifest), encoding="utf-8"

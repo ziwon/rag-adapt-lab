@@ -35,6 +35,7 @@ from rag_adapt_lab.recipes.plan import RECIPE_RETRIEVAL, BenchmarkJob
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 from rag_adapt_lab.tracking.base import Tracker
 from rag_adapt_lab.tracking.null import NullTracker
+from rag_adapt_lab.training.controls import training_control_differences
 
 from .report import render_markdown_report
 
@@ -148,6 +149,7 @@ class BenchmarkRunner:
         documents_path: str | Path | None = None,
         eval_path: str | Path | None = None,
         allow_unverified_adapter: bool = False,
+        allow_unmatched_training_controls: bool = False,
     ) -> None:
         if top_k < 1:
             raise ValueError("top_k must be positive")
@@ -196,8 +198,11 @@ class BenchmarkRunner:
         self.eval_path = Path(eval_path) if eval_path else None
         self.eval_sha256 = file_sha256(self.eval_path) if self.eval_path is not None else None
         self.allow_unverified_adapter = allow_unverified_adapter
+        self.allow_unmatched_training_controls = allow_unmatched_training_controls
         self.adapter_verifications: dict[str, AdapterVerification] = {}
         self.provenance_warnings: list[str] = []
+        self.training_controls_matched: bool | None = None
+        self.training_control_mismatches: list[str] = []
 
         if not self.documents:
             raise ValueError("Benchmark corpus must contain at least one document")
@@ -310,10 +315,33 @@ class BenchmarkRunner:
                     raise ValueError(message)
                 self.provenance_warnings.append(message)
 
+            self.training_controls_matched = (
+                sft.training_control_sha256 == raft.training_control_sha256
+            )
+            if not self.training_controls_matched:
+                self.training_control_mismatches = training_control_differences(
+                    sft.training_controls or {},
+                    raft.training_controls or {},
+                )
+                detail = "; ".join(self.training_control_mismatches[:10])
+                message = "SFT and RAFT training controls differ"
+                if detail:
+                    message = f"{message}: {detail}"
+                if not self.allow_unmatched_training_controls:
+                    raise ValueError(message)
+                self.provenance_warnings.append(
+                    "Confounded comparison: adaptation training controls differ. " + detail
+                )
+
         if self.provenance_warnings:
             for message in self.provenance_warnings:
+                category = (
+                    "CONFOUNDED COMPARISON"
+                    if message.startswith("Confounded comparison:")
+                    else "UNVERIFIED ADAPTER PROVENANCE"
+                )
                 warnings.warn(
-                    f"UNVERIFIED ADAPTER PROVENANCE: {message}",
+                    f"{category}: {message}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -549,6 +577,23 @@ class BenchmarkRunner:
                 )
                 for metric in metrics
             }
+            has_unverified_adapter_warning = any(
+                not warning.startswith("Confounded comparison:")
+                for warning in getattr(self, "provenance_warnings", [])
+            )
+            if has_unverified_adapter_warning and (
+                baseline in {"sft-rag", "raft-rag"}
+                or candidate in {"sft-rag", "raft-rag"}
+            ):
+                for result in comparisons[pair].values():
+                    result["decision_eligible"] = False
+                    result["statistically_significant"] = False
+                    result["status"] = "unverified_adapter_provenance"
+            if pair == "sft-rag->raft-rag" and self.training_controls_matched is False:
+                for result in comparisons[pair].values():
+                    result["decision_eligible"] = False
+                    result["statistically_significant"] = False
+                    result["status"] = "confounded_training_controls"
         return comparisons
 
     def run(self) -> dict[str, Any]:
@@ -608,12 +653,19 @@ class BenchmarkRunner:
             write_jsonl(self.output_dir / "predictions.jsonl", all_rows)
             comparisons = self._comparisons(rows_by_recipe)
             summary = {
+                "schema_name": "benchmark-summary",
                 "schema_version": BENCHMARK_SCHEMA_VERSION,
                 "configuration": configuration,
                 "provenance": {
                     "verified": not self.provenance_warnings
                     and all(item.verified for item in self.adapter_verifications.values()),
+                    "confounded": self.training_controls_matched is False,
                     "allow_unverified_adapter": self.allow_unverified_adapter,
+                    "allow_unmatched_training_controls": (
+                        self.allow_unmatched_training_controls
+                    ),
+                    "training_controls_matched": self.training_controls_matched,
+                    "training_control_mismatches": self.training_control_mismatches,
                     "warnings": self.provenance_warnings,
                 },
                 "retrieval_metrics": retrieval_metrics.as_dict(),

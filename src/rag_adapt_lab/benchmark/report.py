@@ -27,6 +27,13 @@ def _with_unit(value: object, unit: str, *, digits: int = 3) -> str:
 
 
 def _decision(result: Mapping[str, Any]) -> str:
+    status = result.get("status")
+    if status == "confounded_training_controls":
+        return "confounded: adaptation training controls differ"
+    if status == "unverified_adapter_provenance":
+        return "not decision-eligible because adapter provenance is unverified"
+    if status == "insufficient_coverage" or result.get("decision_eligible") is False:
+        return "not decision-eligible because coverage requirements were not met"
     delta = result.get("delta")
     if not isinstance(delta, (int, float)) or isinstance(delta, bool):
         return "could not be estimated"
@@ -167,6 +174,9 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
             f"- Model condition: `{config.get('model', {}).get('condition', 'unknown')}`.",
             f"- Adapter provenance verified: `{provenance.get('verified', True)}`; legacy override: "
             f"`{provenance.get('allow_unverified_adapter', False)}`.",
+            f"- Adaptation training controls matched: "
+            f"`{provenance.get('training_controls_matched')}`; confounded-control override: "
+            f"`{provenance.get('allow_unmatched_training_controls', False)}`.",
             f"- Bootstrap samples: `{config.get('bootstrap_samples', 'unknown')}`.",
             "- LLM-judge scores are complementary; exact match and token F1 remain canonical "
             "deterministic metrics.",
@@ -174,6 +184,9 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         ]
     )
     for warning in provenance.get("warnings", []):
-        lines.append(f"- **UNVERIFIED PROVENANCE:** {warning}")
+        if str(warning).startswith("Confounded comparison:"):
+            lines.append(f"- **CONFOUNDED COMPARISON:** {warning}")
+        else:
+            lines.append(f"- **UNVERIFIED PROVENANCE:** {warning}")
     lines.append("")
     return "\n".join(lines)
