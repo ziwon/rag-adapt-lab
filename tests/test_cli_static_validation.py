@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from rich.text import Text
 from typer.testing import CliRunner
 
 from rag_adapt_lab.cli import app
@@ -128,7 +129,8 @@ def rewrite_manifest(path: Path, manifest: dict[str, object]) -> None:
 
 
 def plain_output(value: str) -> str:
-    return " ".join(value.replace("│", "").split())
+    plain = Text.from_ansi(value).plain
+    return " ".join(plain.replace("│", "").split())
 
 
 def test_dry_run_performs_full_static_protocol_validation(tmp_path: Path) -> None:
