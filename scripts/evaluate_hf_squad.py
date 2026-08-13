@@ -25,12 +25,9 @@ from rag_adapt_lab.evaluation.retrieval import evaluate_retriever
 from rag_adapt_lab.evaluation.statistics import paired_bootstrap_delta
 from rag_adapt_lab.generation.prompts import format_rag_user_prompt, rag_prompt_provenance
 from rag_adapt_lab.generation.thinking import parse_thinking_tokens
-from rag_adapt_lab.provenance import (
-    BENCHMARK_SCHEMA_VERSION,
-    file_sha256,
-    validate_adapter_provenance,
-)
+from rag_adapt_lab.provenance import file_sha256, validate_adapter_provenance
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 
 def parse_args() -> argparse.Namespace:
@@ -307,7 +304,8 @@ def main() -> None:
         }
         for condition in ("rag", "oracle")
     }
-    summary["schema_version"] = BENCHMARK_SCHEMA_VERSION
+    summary["schema_name"] = "squad-paired-evaluation"
+    summary["schema_version"] = 1
     summary["peak_allocated_vram_gb"] = torch.cuda.max_memory_allocated() / 1024**3
     summary["peak_reserved_vram_gb"] = torch.cuda.max_memory_reserved() / 1024**3
     summary["model_id"] = model_config["model_id"]
@@ -315,6 +313,7 @@ def main() -> None:
     summary["chat_template_kwargs"] = chat_template_kwargs
     summary["thinking_enabled"] = thinking_enabled
     summary["seed"] = args.seed
+    validate_artifact_schema(summary, "squad-paired-evaluation-v1.schema.json")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(args.output_dir / "predictions.jsonl", all_rows)

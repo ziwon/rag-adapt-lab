@@ -27,6 +27,7 @@ from rag_adapt_lab.provenance import (
     canonical_sha256,
     file_sha256,
 )
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 from .controls import normalize_training_controls, training_control_sha256
 from .data import (
@@ -523,6 +524,8 @@ def train_qlora(
         "best_checkpoint": trainer.state.best_model_checkpoint,
         "best_validation_metric": trainer.state.best_metric,
     }
+    validate_artifact_schema(manifest, "training-manifest-v3.schema.json")
+    validate_artifact_schema(adapter_manifest, "adapter-manifest-v3.schema.json")
     (output_dir / "training_manifest.json").write_text(
         json.dumps(manifest, indent=2, default=str) + "\n",
         encoding="utf-8",

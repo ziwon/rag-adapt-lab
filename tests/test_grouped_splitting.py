@@ -1,6 +1,7 @@
 from rag_adapt_lab.data.raft import build_raft_partitions
 from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.data.splitting import source_partition_fingerprint, split_rows
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 
 def grouped_rows() -> list[dict[str, object]]:
@@ -107,6 +108,10 @@ def test_document_disjoint_split_before_mining_prevents_all_document_leakage() -
     assert train_documents.isdisjoint(validation_documents)
     assert partitions.manifest["document_overlap_count"] == 0
     assert partitions.manifest["negative_mining_scope"] == "split-before-mining"
+    assert partitions.manifest["schema_name"] == "raft-partition-manifest"
+    validate_artifact_schema(
+        partitions.manifest, "raft-partition-manifest-v1.schema.json"
+    )
     assert {
         row.metadata["negative_mining"]["scope"] for row in partitions.train_rows
     } == {"train-partition-only"}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-adapt-lab.local/schemas/squad-paired-evaluation-v1.schema.json",
+  "title": "standalone paired SQuAD evaluation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_name", "schema_version", "retrieval", "base_rag", "base_oracle",
+    "tuned_rag", "tuned_oracle", "delta_rag", "delta_oracle", "paired_bootstrap",
+    "peak_allocated_vram_gb", "peak_reserved_vram_gb", "model_id", "model_revision",
+    "chat_template_kwargs", "thinking_enabled", "seed"
+  ],
+  "properties": {
+    "schema_name": {"const": "squad-paired-evaluation"},
+    "schema_version": {"const": 1},
+    "retrieval": {"type": "object"},
+    "base_rag": {"type": "object"},
+    "base_oracle": {"type": "object"},
+    "tuned_rag": {"type": "object"},
+    "tuned_oracle": {"type": "object"},
+    "delta_rag": {"type": "object"},
+    "delta_oracle": {"type": "object"},
+    "paired_bootstrap": {"type": "object"},
+    "peak_allocated_vram_gb": {"type": "number", "minimum": 0},
+    "peak_reserved_vram_gb": {"type": "number", "minimum": 0},
+    "model_id": {"type": "string", "minLength": 1},
+    "model_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "chat_template_kwargs": {"type": "object"},
+    "thinking_enabled": {"type": "boolean"},
+    "seed": {"type": "integer"}
+  }
+}

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from rag_adapt_lab.schema_validation import validate_artifact_schema
+
 ADAPTER_MANIFEST_FILENAME = "raglab_adapter_manifest.json"
 ADAPTER_MANIFEST_SCHEMA_VERSION = 3
 TRAINING_MANIFEST_SCHEMA_VERSION = 3
@@ -217,6 +219,7 @@ def _verify_adapter_manifest(
     expected_prompt: Mapping[str, Any] | None,
     held_out_evaluation_sha256: str | None,
 ) -> AdapterVerification:
+    validate_artifact_schema(manifest, "adapter-manifest-v3.schema.json")
     adapter_model = manifest.get("model")
     if not isinstance(adapter_model, Mapping):
         raise ValueError("Adapter manifest field 'model' must be a mapping")

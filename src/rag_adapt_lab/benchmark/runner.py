@@ -33,6 +33,7 @@ from rag_adapt_lab.provenance import (
 )
 from rag_adapt_lab.recipes.plan import RECIPE_RETRIEVAL, BenchmarkJob
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 from rag_adapt_lab.tracking.base import Tracker
 from rag_adapt_lab.tracking.null import NullTracker
 from rag_adapt_lab.training.controls import training_control_differences
@@ -681,6 +682,7 @@ class BenchmarkRunner:
             }
             if comparison_metrics:
                 self.tracker.log(comparison_metrics)
+            validate_artifact_schema(summary, "benchmark-summary-v3.schema.json")
             summary_path = self.output_dir / "summary.json"
             summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
             report_path = self.output_dir / "report.md"

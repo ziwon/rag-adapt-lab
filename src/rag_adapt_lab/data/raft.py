@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from rag_adapt_lab.retrieval.base import Retriever
 from rag_adapt_lab.retrieval.bm25 import BM25Retriever
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 from .schema import Document, EvalExample, RAFTContext, RAFTExample
 from .splitting import CorpusPolicy, SplitStrategy, partition_audit, split_rows
@@ -319,6 +320,7 @@ def build_raft_partitions(
     if corpus_policy == "document-disjoint" and audit.document_overlap_count:
         raise ValueError("document-disjoint RAFT mining leaked documents across partitions")
     manifest = {
+        "schema_name": "raft-partition-manifest",
         "schema_version": 1,
         **split.metadata(),
         "negative_mining_scope": "split-before-mining",
@@ -335,4 +337,5 @@ def build_raft_partitions(
         },
         **audit.as_dict(),
     }
+    validate_artifact_schema(manifest, "raft-partition-manifest-v1.schema.json")
     return RAFTPartitions(train_rows, validation_rows, manifest)

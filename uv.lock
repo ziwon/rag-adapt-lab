@@ -2217,6 +2217,7 @@ name = "rag-adapt-lab"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -2261,6 +2262,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'train'", specifier = "==0.50.0" },
     { name = "datasets", marker = "extra == 'train'", specifier = "==4.8.5" },
     { name = "faiss-cpu", marker = "extra == 'rag'", specifier = "==1.15.0" },
+    { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "openai", marker = "extra == 'rag'", specifier = "==2.53.0" },

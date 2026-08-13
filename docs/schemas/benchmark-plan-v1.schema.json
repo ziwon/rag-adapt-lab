@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-adapt-lab.local/schemas/benchmark-plan-v1.schema.json",
+  "title": "rag-adapt-lab benchmark plan and static validation report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_name", "schema_version", "fixed_contract", "jobs", "validation"],
+  "properties": {
+    "schema_name": {"const": "benchmark-plan"},
+    "schema_version": {"const": 1},
+    "fixed_contract": {
+      "type": "object",
+      "required": [
+        "model_config", "documents", "eval_set", "retriever", "scorer", "top_k",
+        "seed", "generation", "chat_template_kwargs", "prompt", "bootstrap_samples",
+        "warmup_examples", "load_in_4bit", "allow_unverified_adapter",
+        "allow_unmatched_training_controls"
+      ]
+    },
+    "jobs": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "recipe", "model_config", "documents", "eval_set", "use_retrieval", "adapter_path"
+        ],
+        "properties": {
+          "recipe": {"enum": ["base", "rag", "sft-rag", "raft-rag"]},
+          "model_config": {"type": "string"},
+          "documents": {"type": "string"},
+          "eval_set": {"type": "string"},
+          "use_retrieval": {"type": "boolean"},
+          "adapter_path": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "validation_level", "model_weights_loaded", "adapter_provenance_validated",
+        "training_controls_matched", "scorer_configuration_validated", "ready_for_execution"
+      ],
+      "properties": {
+        "validation_level": {"enum": ["structural", "static-protocol"]},
+        "model_weights_loaded": {"const": false},
+        "adapter_provenance_validated": {"type": "boolean"},
+        "training_controls_matched": {"type": ["boolean", "null"]},
+        "scorer_configuration_validated": {"type": "boolean"},
+        "ready_for_execution": {"type": "boolean"}
+      }
+    }
+  }
+}

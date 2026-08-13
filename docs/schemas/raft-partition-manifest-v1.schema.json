@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-adapt-lab.local/schemas/raft-partition-manifest-v1.schema.json",
+  "title": "rag-adapt-lab RAFT partition manifest v1",
+  "type": "object",
+  "required": [
+    "schema_name", "schema_version", "strategy", "group_by", "group_counts",
+    "corpus_policy", "partition_fingerprints", "document_overlap_count",
+    "question_overlap_count", "negative_mining_scope", "negative_strategy",
+    "candidate_pool_size", "distractors", "document_pools", "seed"
+  ],
+  "properties": {
+    "schema_name": {"const": "raft-partition-manifest"},
+    "schema_version": {"const": 1},
+    "strategy": {"enum": ["row", "grouped"]},
+    "group_by": {"type": "array", "items": {"type": "string"}},
+    "group_counts": {"type": "object"},
+    "corpus_policy": {"enum": ["shared-corpus", "document-disjoint"]},
+    "partition_fingerprints": {"type": "object"},
+    "document_overlap_count": {"type": "integer", "minimum": 0},
+    "question_overlap_count": {"type": "integer", "minimum": 0},
+    "negative_mining_scope": {"const": "split-before-mining"},
+    "negative_strategy": {"enum": ["random", "bm25-hard-negative"]},
+    "candidate_pool_size": {"type": "integer", "minimum": 1},
+    "distractors": {"type": "integer", "minimum": 0},
+    "document_pools": {
+      "type": "object", "additionalProperties": false,
+      "required": ["train_count", "validation_count", "overlap_count"],
+      "properties": {
+        "train_count": {"type": "integer", "minimum": 0},
+        "validation_count": {"type": "integer", "minimum": 0},
+        "overlap_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "seed": {"type": "integer"}
+  }
+}
