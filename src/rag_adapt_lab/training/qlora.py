@@ -13,6 +13,7 @@ from rag_adapt_lab.config import (
     validate_hf_model_config,
 )
 from rag_adapt_lab.data.io import load_eval, read_jsonl
+from rag_adapt_lab.data.schema import RAFTExample
 from rag_adapt_lab.data.splitting import (
     count_groups,
     enforce_partition_policy,
@@ -31,6 +32,7 @@ from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 from .controls import normalize_training_controls, training_control_sha256
 from .data import (
+    TrainingMode,
     TrainingSplit,
     configured_training_split,
     ensure_disjoint_training_rows,
@@ -38,6 +40,18 @@ from .data import (
     render_chat_prompt_completions,
     split_fingerprint,
 )
+
+
+def _validate_raft_training_rows(
+    rows: list[dict[str, Any]],
+    *,
+    mode: TrainingMode,
+) -> list[dict[str, Any]]:
+    if mode != "raft" and not any(
+        "contexts" in row or "evidence_doc_ids" in row for row in rows
+    ):
+        return rows
+    return [RAFTExample.model_validate(row).model_dump(mode="json") for row in rows]
 
 
 def _file_record(path: str | Path | None) -> dict[str, str] | None:
@@ -134,6 +148,7 @@ def require_verifiable_training_prompt(training_cfg: Mapping[str, Any]) -> None:
 
 def _load_training_split(
     *,
+    mode: TrainingMode,
     train_file: str | Path,
     validation_file: str | Path | None,
     held_out_eval_file: str | Path | None,
@@ -145,6 +160,7 @@ def _load_training_split(
     rows = read_jsonl(train_path)
     if not rows:
         raise ValueError(f"Training file is empty: {train_file}")
+    rows = _validate_raft_training_rows(rows, mode=mode)
 
     configured_split = dict(split_config or {})
     resolved_validation_ratio = float(
@@ -180,6 +196,7 @@ def _load_training_split(
         validation_rows = read_jsonl(validation_path)
         if not validation_rows:
             raise ValueError(f"Validation file is empty: {validation_file}")
+        validation_rows = _validate_raft_training_rows(validation_rows, mode=mode)
         ensure_disjoint_training_rows(
             rows,
             validation_rows,
@@ -307,6 +324,7 @@ def train_qlora(
 
     seed = int(training_cfg.get("seed", 42))
     split = _load_training_split(
+        mode=mode,
         train_file=train_file,
         validation_file=validation_file,
         held_out_eval_file=held_out_eval_file,

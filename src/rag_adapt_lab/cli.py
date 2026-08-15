@@ -12,7 +12,12 @@ from rag_adapt_lab.config import (
     load_yaml,
     validate_hf_model_config,
 )
-from rag_adapt_lab.data.io import load_documents, load_eval, load_qa_examples, write_jsonl
+from rag_adapt_lab.data.io import (
+    load_documents,
+    load_eval,
+    load_qa_examples,
+    write_raft_jsonl,
+)
 from rag_adapt_lab.data.raft import (
     build_raft_examples,
     build_raft_partitions,
@@ -140,7 +145,7 @@ def prepare_raft(
             negative_strategy=negative_strategy,  # type: ignore[arg-type]
             candidate_pool_size=candidate_pool_size,
         )
-        write_jsonl(output, rows)
+        write_raft_jsonl(output, rows)
         console.print(f"[green]Wrote[/green] {len(rows)} RAFT examples to {output}")
         return
 
@@ -174,8 +179,8 @@ def prepare_raft(
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--split-config") from exc
-    write_jsonl(output, partitions.train_rows)
-    write_jsonl(validation_output, partitions.validation_rows)
+    write_raft_jsonl(output, partitions.train_rows)
+    write_raft_jsonl(validation_output, partitions.validation_rows)
     resolved_manifest.parent.mkdir(parents=True, exist_ok=True)
     resolved_manifest.write_text(
         json.dumps(partitions.manifest, indent=2) + "\n",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol
 
+from rag_adapt_lab.data.schema import RAFTExample
 from rag_adapt_lab.data.splitting import (
     CorpusPolicy,
     PartitionSplit,
@@ -106,11 +107,17 @@ def prompt_completion_records(
     if mode not in {"sft", "raft"}:
         raise ValueError(f"Unsupported training mode: {mode!r}")
     records: list[dict[str, Any]] = []
-    for row in rows:
+    for source_row in rows:
+        row: Mapping[str, Any] = source_row
+        validated_raft: RAFTExample | None = None
+        if mode == "raft" or "contexts" in row or "evidence_doc_ids" in row:
+            validated_raft = RAFTExample.model_validate(dict(row))
+            row = validated_raft.model_dump(mode="json")
         if mode == "raft":
+            assert validated_raft is not None
             user_prompt = format_raft_user_prompt(dict(row))
             plain_prompt = format_raft_prompt(dict(row))
-            completion = str(row.get("answer", ""))
+            completion = validated_raft.answer
         else:
             user_prompt = format_sft_user_prompt(dict(row))
             plain_prompt = format_sft_prompt(dict(row))

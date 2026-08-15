@@ -9,12 +9,14 @@ from rag_adapt_lab.training.formatting import (
 
 def test_raft_prompt_does_not_expose_oracle_relevance() -> None:
     row = {
+        "id": "raft-1",
         "question": "Which document matters?",
         "answer": "the first",
         "contexts": [
-            {"text": "oracle", "relevant": True},
-            {"text": "noise", "relevant": False},
+            {"doc_id": "oracle", "text": "oracle", "relevant": True},
+            {"doc_id": "noise", "text": "noise", "relevant": False},
         ],
+        "evidence_doc_ids": ["oracle"],
     }
     prompt = format_raft_prompt(row)
     assert "| relevant" not in prompt.lower()
@@ -26,8 +28,14 @@ def test_raft_prompt_does_not_expose_oracle_relevance() -> None:
 
 def test_training_and_inference_share_the_same_rag_prompt() -> None:
     row = {
+        "id": "raft-2",
         "question": "What happened?",
-        "contexts": [{"text": "first"}, {"text": "second"}],
+        "answer": "first",
+        "contexts": [
+            {"doc_id": "first", "text": "first", "relevant": True},
+            {"doc_id": "second", "text": "second", "relevant": False},
+        ],
+        "evidence_doc_ids": ["first"],
     }
     expected = format_rag_user_prompt(
         question="What happened?",
@@ -47,11 +55,14 @@ def test_sft_and_raft_differ_only_by_supplied_contexts() -> None:
     sft = format_sft_user_prompt({"input": question, "instruction": "Ignore this variant"})
     raft = format_raft_user_prompt(
         {
+            "id": "raft-3",
             "question": question,
+            "answer": "positive",
             "contexts": [
-                {"text": "positive", "relevant": True, "oracle": "secret"},
-                {"text": "distractor", "relevant": False},
+                {"doc_id": "positive", "text": "positive", "relevant": True},
+                {"doc_id": "distractor", "text": "distractor", "relevant": False},
             ],
+            "evidence_doc_ids": ["positive"],
         }
     )
     assert sft == format_rag_user_prompt(question=question, contexts=[])

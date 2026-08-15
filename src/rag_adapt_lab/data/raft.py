@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -107,6 +108,37 @@ def _retrieved_negatives(
     ]
 
 
+def build_raft_contexts(
+    *,
+    positive_documents: Sequence[Document],
+    negative_documents: Sequence[Document],
+) -> list[RAFTContext]:
+    """Build unambiguous RAFT evidence metadata from disjoint document groups."""
+    positive_ids = [document.id for document in positive_documents]
+    negative_ids = [document.id for document in negative_documents]
+    if not positive_ids:
+        raise ValueError("RAFT contexts require at least one positive document")
+    duplicate_ids = sorted(
+        {
+            doc_id
+            for doc_id in [*positive_ids, *negative_ids]
+            if [*positive_ids, *negative_ids].count(doc_id) > 1
+        }
+    )
+    if duplicate_ids:
+        raise ValueError(f"RAFT context document IDs must be unique: {duplicate_ids}")
+    return [
+        *(
+            RAFTContext(doc_id=document.id, text=document.text, relevant=True)
+            for document in positive_documents
+        ),
+        *(
+            RAFTContext(doc_id=document.id, text=document.text, relevant=False)
+            for document in negative_documents
+        ),
+    ]
+
+
 def build_raft_examples(
     documents: list[Document],
     examples: list[EvalExample],
@@ -148,10 +180,6 @@ def build_raft_examples(
         if missing:
             raise ValueError(f"RAFT example {example.id!r} references missing documents: {missing}")
 
-        contexts = [
-            RAFTContext(doc_id=doc_id, text=documents_by_id[doc_id].text, relevant=True)
-            for doc_id in relevant_ids
-        ]
         rng = _example_rng(seed, example.id)
         if negative_strategy == "random":
             sampled = _random_negatives(
@@ -176,13 +204,9 @@ def build_raft_examples(
                 f"RAFT example {example.id!r} requested {distractors} distractors but the "
                 f"{mining_scope} document pool provides only {len(sampled)}"
             )
-        contexts.extend(
-            RAFTContext(
-                doc_id=negative.document.id,
-                text=negative.document.text,
-                relevant=False,
-            )
-            for negative in sampled
+        contexts = build_raft_contexts(
+            positive_documents=[documents_by_id[doc_id] for doc_id in relevant_ids],
+            negative_documents=[negative.document for negative in sampled],
         )
         rng.shuffle(contexts)
         metadata = dict(example.metadata)

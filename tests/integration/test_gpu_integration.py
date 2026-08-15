@@ -28,7 +28,7 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
         pytest.fail("GPU integration was requested but CUDA is unavailable")
 
     from rag_adapt_lab.benchmark.runner import BenchmarkRunner, TransformersGeneratorFactory
-    from rag_adapt_lab.data.io import load_documents, load_eval
+    from rag_adapt_lab.data.io import load_documents, load_eval, load_raft
     from rag_adapt_lab.evaluation.scorers import build_scorer
     from rag_adapt_lab.recipes.plan import build_plan
     from rag_adapt_lab.retrieval.factory import create_retriever
@@ -171,16 +171,28 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
             for row in source_validation
         ],
     )
-    raft_contexts = [
-        {"doc_id": "alpha", "text": "alpha answer", "relevant": True},
-        {"doc_id": "beta", "text": "beta answer", "relevant": False},
-    ]
+
+    def contexts_for_answer(answer_doc_id: str) -> list[dict[str, object]]:
+        distractor_id = "beta" if answer_doc_id == "alpha" else "alpha"
+        return [
+            {
+                "doc_id": answer_doc_id,
+                "text": f"{answer_doc_id} answer",
+                "relevant": True,
+            },
+            {
+                "doc_id": distractor_id,
+                "text": f"{distractor_id} answer",
+                "relevant": False,
+            },
+        ]
+
     write_jsonl(
         raft_train,
         [
             {
                 **row,
-                "contexts": raft_contexts if row["answer"] == "alpha" else list(reversed(raft_contexts)),
+                "contexts": contexts_for_answer(str(row["answer"])),
                 "evidence_doc_ids": [row["answer"]],
             }
             for row in source_train
@@ -191,11 +203,16 @@ def test_tiny_real_lora_save_load_generation_memory_and_benchmark(tmp_path: Path
         [
             {
                 **row,
-                "contexts": raft_contexts,
+                "contexts": contexts_for_answer("alpha"),
                 "evidence_doc_ids": ["alpha"],
             }
             for row in source_validation
         ],
+    )
+    assert all(
+        set(row.evidence_doc_ids)
+        == {context.doc_id for context in row.contexts if context.relevant}
+        for row in [*load_raft(raft_train), *load_raft(raft_validation)]
     )
 
     adapters: dict[str, Path] = {}

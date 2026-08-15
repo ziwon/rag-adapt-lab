@@ -154,7 +154,15 @@ def test_impossible_grouping_constraints_raise_clear_error() -> None:
 
 def test_source_partition_fingerprint_is_representation_independent_but_label_sensitive() -> None:
     sft = [{"id": "q1", "input": "What?", "output": "Answer"}]
-    raft = [{"id": "q1", "question": " what? ", "answer": "Answer", "contexts": []}]
+    raft = [
+        {
+            "id": "q1",
+            "question": " what? ",
+            "answer": "Answer",
+            "contexts": [{"doc_id": "doc-1", "text": "Answer", "relevant": True}],
+            "evidence_doc_ids": ["doc-1"],
+        }
+    ]
     changed_label = [{"id": "q1", "question": "What?", "answer": "Different"}]
     assert source_partition_fingerprint(sft) == source_partition_fingerprint(raft)
     assert source_partition_fingerprint(sft) != source_partition_fingerprint(changed_label)

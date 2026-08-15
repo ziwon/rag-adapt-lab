@@ -10,7 +10,7 @@ from typing import Any
 
 from datasets import Dataset, load_dataset
 
-from rag_adapt_lab.data.io import write_jsonl
+from rag_adapt_lab.data.io import write_jsonl, write_raft_jsonl
 from rag_adapt_lab.data.raft import build_raft_partitions
 from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.data.validation import ensure_disjoint_qa_splits
@@ -176,8 +176,10 @@ def main() -> None:
     write_jsonl(args.output_dir / "train_documents.jsonl", train_documents)
     write_jsonl(args.output_dir / "sft_train.jsonl", sft_train_rows)
     write_jsonl(args.output_dir / "sft_validation.jsonl", sft_validation_rows)
-    write_jsonl(args.output_dir / "raft_train.jsonl", raft_partitions.train_rows)
-    write_jsonl(args.output_dir / "raft_validation.jsonl", raft_partitions.validation_rows)
+    write_raft_jsonl(args.output_dir / "raft_train.jsonl", raft_partitions.train_rows)
+    write_raft_jsonl(
+        args.output_dir / "raft_validation.jsonl", raft_partitions.validation_rows
+    )
     write_jsonl(args.output_dir / "eval_documents.jsonl", eval_documents)
     write_jsonl(args.output_dir / "eval.jsonl", eval_examples)
     manifest = {

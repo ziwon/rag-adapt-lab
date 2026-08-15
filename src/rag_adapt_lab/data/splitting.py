@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .schema import RAFTExample
 from .validation import normalize_question
 
 SplitStrategy = Literal["row", "grouped"]
@@ -75,14 +76,22 @@ class PartitionSplit:
 
 
 def rows_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
+    normalized_rows = [_validate_raft_metadata_if_present(row) for row in rows]
     payload = json.dumps(
-        [dict(row) for row in rows],
+        normalized_rows,
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_raft_metadata_if_present(row: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(row)
+    if "contexts" in value or "evidence_doc_ids" in value:
+        return RAFTExample.model_validate(value).model_dump(mode="json")
+    return value
 
 
 def source_partition_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
@@ -95,7 +104,8 @@ def source_partition_fingerprint(rows: Sequence[Mapping[str, Any]]) -> str:
     """
     identities: list[dict[str, str]] = []
     seen_ids: set[str] = set()
-    for row in rows:
+    for source_row in rows:
+        row = _validate_raft_metadata_if_present(source_row)
         source_id = str(row.get("id", "")).strip()
         question = normalize_question(row_question(row))
         answer = str(
@@ -157,6 +167,7 @@ def _group_tokens(row: Mapping[str, Any], fields: Sequence[str]) -> set[tuple[st
 
 
 def positive_document_ids(row: Mapping[str, Any]) -> set[str]:
+    row = _validate_raft_metadata_if_present(row)
     ids = {str(value) for value in row.get("relevant_doc_ids", []) if str(value)}
     ids.update(str(value) for value in row.get("evidence_doc_ids", []) if str(value))
     for evidence in row.get("evidence", []):

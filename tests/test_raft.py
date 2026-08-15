@@ -1,5 +1,12 @@
-from rag_adapt_lab.data.raft import build_raft_examples
-from rag_adapt_lab.data.schema import Document, EvalExample
+import json
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from rag_adapt_lab.data.io import load_raft, write_raft_jsonl
+from rag_adapt_lab.data.raft import build_raft_contexts, build_raft_examples
+from rag_adapt_lab.data.schema import Document, EvalExample, RAFTExample
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 
 
@@ -15,6 +22,121 @@ class RankedRetriever(Retriever):
             RetrievalResult(document=document, score=1.0 / rank, rank=rank)
             for rank, document in enumerate(self.documents[:top_k], start=1)
         ]
+
+
+def raft_row() -> dict[str, object]:
+    return {
+        "id": "q42",
+        "question": "Which document answers the question?",
+        "answer": "alpha",
+        "contexts": [
+            {"doc_id": "alpha", "text": "alpha answer", "relevant": True},
+            {"doc_id": "beta", "text": "beta answer", "relevant": False},
+        ],
+        "evidence_doc_ids": ["alpha"],
+    }
+
+
+def test_valid_raft_evidence_metadata() -> None:
+    row = RAFTExample.model_validate(raft_row())
+    assert row.evidence_doc_ids == ["alpha"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda row: row.update(contexts=[]),
+            "contexts must contain at least one item",
+        ),
+        (
+            lambda row: row.update(evidence_doc_ids=[]),
+            "evidence_doc_ids must not be empty",
+        ),
+        (
+            lambda row: row.update(evidence_doc_ids=["missing"]),
+            "evidence document IDs missing from contexts=['missing']",
+        ),
+        (
+            lambda row: row.update(evidence_doc_ids=["beta"]),
+            "missing evidence document IDs=['alpha']",
+        ),
+        (
+            lambda row: row["contexts"][0].update(relevant=False),  # type: ignore[index,union-attr]
+            "evidence contexts marked relevant=false=['alpha']",
+        ),
+        (
+            lambda row: row["contexts"][1].update(relevant=True),  # type: ignore[index,union-attr]
+            "unexpected relevant document IDs=['beta']",
+        ),
+        (
+            lambda row: row["contexts"].append(  # type: ignore[union-attr]
+                {"doc_id": "alpha", "text": "duplicate", "relevant": True}
+            ),
+            "duplicated context IDs=['alpha']",
+        ),
+        (
+            lambda row: row.update(evidence_doc_ids=["alpha", "alpha"]),
+            "duplicated evidence IDs=['alpha']",
+        ),
+        (
+            lambda row: [
+                context.update(relevant=False)  # type: ignore[union-attr]
+                for context in row["contexts"]  # type: ignore[union-attr]
+            ],
+            "no contexts are marked relevant=true",
+        ),
+    ],
+)
+def test_invalid_raft_evidence_metadata_is_rejected(
+    mutation: object,
+    message: str,
+) -> None:
+    row = raft_row()
+    mutation(row)  # type: ignore[operator]
+    with pytest.raises(ValidationError, match=message.replace("[", r"\[").replace("]", r"\]")):
+        RAFTExample.model_validate(row)
+
+
+def test_multiple_positive_contexts_are_valid() -> None:
+    row = raft_row()
+    row["contexts"] = [  # type: ignore[assignment]
+        *row["contexts"],  # type: ignore[misc]
+        {"doc_id": "gamma", "text": "supporting answer", "relevant": True},
+    ]
+    row["evidence_doc_ids"] = ["gamma", "alpha"]
+    validated = RAFTExample.model_validate(row)
+    assert {context.doc_id for context in validated.contexts if context.relevant} == {
+        "alpha",
+        "gamma",
+    }
+
+
+def test_invalid_external_raft_jsonl_is_rejected(tmp_path: Path) -> None:
+    row = raft_row()
+    row["evidence_doc_ids"] = ["beta"]
+    source = tmp_path / "invalid.jsonl"
+    source.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="q42.*inconsistent evidence metadata"):
+        load_raft(source)
+
+
+def test_invalid_raft_jsonl_is_rejected_before_writing(tmp_path: Path) -> None:
+    row = raft_row()
+    row["evidence_doc_ids"] = ["beta"]
+    with pytest.raises(ValidationError, match="q42.*inconsistent evidence metadata"):
+        write_raft_jsonl(tmp_path / "invalid.jsonl", [row])
+
+
+def test_build_raft_contexts_marks_disjoint_evidence() -> None:
+    contexts = build_raft_contexts(
+        positive_documents=[Document(id="alpha", text="alpha")],
+        negative_documents=[Document(id="beta", text="beta")],
+    )
+    assert [(context.doc_id, context.relevant) for context in contexts] == [
+        ("alpha", True),
+        ("beta", False),
+    ]
 
 
 def test_build_raft_examples() -> None:

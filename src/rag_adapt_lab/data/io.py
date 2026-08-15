@@ -81,3 +81,15 @@ def write_jsonl(
         for row in rows:
             value = row.model_dump(mode="json") if isinstance(row, BaseModel) else dict(row)
             stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+
+
+def write_raft_jsonl(
+    path: str | Path,
+    rows: Iterable[RAFTExample | Mapping[str, Any]],
+) -> None:
+    """Validate RAFT invariants immediately before persisting prepared data."""
+    validated = [
+        row if isinstance(row, RAFTExample) else RAFTExample.model_validate(dict(row))
+        for row in rows
+    ]
+    write_jsonl(path, validated)

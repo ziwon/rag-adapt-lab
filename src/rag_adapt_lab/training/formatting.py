@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rag_adapt_lab.data.schema import RAFTExample
 from rag_adapt_lab.generation.prompts import format_rag_user_prompt
 
 
@@ -19,9 +20,10 @@ def format_sft_prompt(row: dict[str, Any]) -> str:
 
 
 def format_raft_user_prompt(row: dict[str, Any]) -> str:
+    validated = RAFTExample.model_validate(row)
     return format_rag_user_prompt(
-        question=str(row.get("question", "")),
-        contexts=[str(item.get("text", "")) for item in row.get("contexts", [])],
+        question=validated.question,
+        contexts=[context.text for context in validated.contexts],
     )
 
 

@@ -51,9 +51,10 @@ def test_prompt_completion_records_keep_oracle_labels_out_of_prompt() -> None:
                 "question": "Which evidence?",
                 "answer": "the first",
                 "contexts": [
-                    {"text": "evidence", "relevant": True},
-                    {"text": "noise", "relevant": False},
+                    {"doc_id": "evidence", "text": "evidence", "relevant": True},
+                    {"doc_id": "noise", "text": "noise", "relevant": False},
                 ],
+                "evidence_doc_ids": ["evidence"],
             }
         ],
         mode="raft",
@@ -62,6 +63,48 @@ def test_prompt_completion_records_keep_oracle_labels_out_of_prompt() -> None:
     assert records[0]["completion"] == "the first"
     assert "| relevant" not in records[0]["prompt"].lower()
     assert "| distractor" not in records[0]["prompt"].lower()
+
+
+def test_invalid_raft_training_jsonl_is_rejected_before_fingerprinting(
+    tmp_path: Path,
+) -> None:
+    train_path = tmp_path / "invalid-raft.jsonl"
+    train_path.write_text(
+        '{"id":"q42","question":"question","answer":"alpha",'
+        '"contexts":[{"doc_id":"alpha","text":"alpha","relevant":true},'
+        '{"doc_id":"beta","text":"beta","relevant":false}],'
+        '"evidence_doc_ids":["beta"]}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="q42.*inconsistent evidence metadata"):
+        load_training_split(
+            mode="raft",
+            train_file=train_path,
+            validation_file=None,
+            held_out_eval_file=None,
+            validation_ratio=0.0,
+            seed=42,
+        )
+
+
+def test_sft_conversion_rejects_invalid_rows_with_raft_metadata() -> None:
+    with pytest.raises(ValueError, match="inconsistent evidence metadata"):
+        prompt_completion_records(
+            [
+                {
+                    "id": "bad-raft-as-sft",
+                    "question": "question",
+                    "answer": "alpha",
+                    "contexts": [
+                        {"doc_id": "alpha", "text": "alpha", "relevant": True},
+                        {"doc_id": "beta", "text": "beta", "relevant": False},
+                    ],
+                    "evidence_doc_ids": ["beta"],
+                }
+            ],
+            mode="sft",
+            use_chat_template=False,
+        )
 
 
 class FakeChatTokenizer:
@@ -136,6 +179,7 @@ def test_validation_cannot_be_the_held_out_benchmark_file(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="cannot be used as training validation"):
         load_training_split(
+            mode="sft",
             train_file=train_path,
             validation_file=validation_path,
             held_out_eval_file=validation_path,
@@ -175,6 +219,7 @@ def test_explicit_validation_enforces_custom_group_fields(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="configured grouping values"):
         load_training_split(
+            mode="sft",
             train_file=train_path,
             validation_file=validation_path,
             held_out_eval_file=None,
@@ -194,6 +239,7 @@ def test_nested_split_ratio_and_seed_override_legacy_top_level_values(tmp_path: 
         encoding="utf-8",
     )
     split = load_training_split(
+        mode="sft",
         train_file=train_path,
         validation_file=None,
         held_out_eval_file=None,
