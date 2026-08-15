@@ -368,6 +368,7 @@ def benchmark(
             "validation_level": "structural",
             "model_weights_loaded": False,
             "adapter_provenance_validated": False,
+            "adapter_provenance": {},
             "training_controls_matched": None,
             "scorer_configuration_validated": False,
             "ready_for_execution": False,
@@ -444,6 +445,10 @@ def benchmark(
                 verification.verified
                 for verification in static_runner.adapter_verifications.values()
             ),
+            "adapter_provenance": {
+                recipe: verification.as_dict()
+                for recipe, verification in static_runner.adapter_verifications.items()
+            },
             "training_controls_matched": static_runner.training_controls_matched,
             "scorer_configuration_validated": True,
             "ready_for_execution": True,

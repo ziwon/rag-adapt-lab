@@ -27,10 +27,15 @@ from rag_adapt_lab.provenance import (
     artifact_sha256,
     canonical_sha256,
     file_sha256,
+    normalize_peft_adapter_config,
 )
 from rag_adapt_lab.schema_validation import validate_artifact_schema
 
-from .controls import normalize_training_controls, training_control_sha256
+from .controls import (
+    normalize_training_controls,
+    peft_lora_config_kwargs,
+    training_control_sha256,
+)
 from .data import (
     TrainingMode,
     TrainingSplit,
@@ -392,7 +397,6 @@ def train_qlora(
         training_cfg,
         has_validation=eval_dataset is not None,
     )
-    control_sha256 = training_control_sha256(training_controls)
 
     dtype_by_name = {
         "bfloat16": torch.bfloat16,
@@ -413,12 +417,11 @@ def train_qlora(
     model.config.use_cache = False
 
     peft_cfg = LoraConfig(
-        r=int(training_cfg.get("lora_r", 16)),
-        lora_alpha=int(training_cfg.get("lora_alpha", 32)),
-        lora_dropout=float(training_cfg.get("lora_dropout", 0.05)),
-        bias=str(training_cfg.get("lora_bias", "none")),
-        task_type="CAUSAL_LM",
-        target_modules=training_cfg.get("target_modules", "all-linear"),
+        **peft_lora_config_kwargs(
+            training_controls,
+            model_id=model_id,
+            revision=model_revision,
+        )
     )
 
     sft_values = build_sft_config_values(
@@ -455,6 +458,16 @@ def train_qlora(
     adapter_path = output_dir / "adapter"
     trainer.save_model(str(adapter_path))
     tokenizer.save_pretrained(str(adapter_path))
+
+    persisted_peft_config = json.loads(
+        (adapter_path / "adapter_config.json").read_text(encoding="utf-8")
+    )
+    peft_view = normalize_peft_adapter_config(
+        persisted_peft_config,
+        require_complete=True,
+    )
+    training_controls["adapter"] = dict(peft_view["adapter"])
+    control_sha256 = training_control_sha256(training_controls)
 
     prompt_provenance = rag_prompt_provenance()
     held_out_evaluation_sha256 = file_sha256(held_out_eval_file)

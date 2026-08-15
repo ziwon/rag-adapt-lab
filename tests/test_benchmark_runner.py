@@ -17,7 +17,10 @@ from rag_adapt_lab.provenance import (
 )
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
-from rag_adapt_lab.training.controls import normalize_training_controls
+from rag_adapt_lab.training.controls import (
+    normalize_training_controls,
+    peft_lora_config_kwargs,
+)
 
 TEST_TRAINING_CONTROLS = normalize_training_controls({}, has_validation=True)
 
@@ -93,12 +96,26 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
             relevant_doc_ids=["beta"],
         ),
     ]
+    evaluation = tmp_path / "eval.jsonl"
+    evaluation.write_text('{"id":"held-out","question":"held out"}\n', encoding="utf-8")
+    legacy_adapters: dict[str, Path] = {}
+    for mode in ("sft", "raft"):
+        adapter = tmp_path / f"{mode}-adapter"
+        adapter.mkdir()
+        (adapter / "adapter_config.json").write_text(
+            json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        )
+        (adapter / "adapter_model.safetensors").write_bytes(mode.encode())
+        legacy_adapters[mode] = adapter
     jobs = build_plan(
         recipes=["base", "rag", "sft-rag", "raft-rag"],
         model_config="model.yaml",
         documents="documents.jsonl",
         eval_set="eval.jsonl",
-        adapters={"sft-rag": "sft-adapter", "raft-rag": "raft-adapter"},
+        adapters={
+            "sft-rag": legacy_adapters["sft"],
+            "raft-rag": legacy_adapters["raft"],
+        },
     )
     retriever = StaticRetriever()
     factory = FakeGeneratorFactory()
@@ -120,12 +137,17 @@ def test_benchmark_executes_matrix_and_writes_reports(tmp_path: Path) -> None:
         top_k=2,
         bootstrap_samples=100,
         seed=3,
+        eval_path=evaluation,
         allow_unverified_adapter=True,
     )
     summary = runner.run()
 
     assert retriever.search_calls == len(examples)  # One shared retrieval pass.
-    assert factory.created == [None, "sft-adapter", "raft-adapter"]
+    assert factory.created == [
+        None,
+        str(legacy_adapters["sft"]),
+        str(legacy_adapters["raft"]),
+    ]
     assert set(summary["recipes"]) == {"base", "rag", "sft-rag", "raft-rag"}
     assert summary["configuration"]["prompt"]["version"] == "4"
     assert summary["schema_version"] == BENCHMARK_SCHEMA_VERSION
@@ -199,7 +221,14 @@ def test_benchmark_rejects_distinct_paths_with_identical_adapter_hashes(tmp_path
         adapter = tmp_path / mode
         adapter.mkdir()
         (adapter / "adapter_config.json").write_text(
-            json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+            json.dumps(
+                peft_lora_config_kwargs(
+                    TEST_TRAINING_CONTROLS,
+                    model_id="test/model",
+                    revision="0" * 40,
+                )
+            ),
+            encoding="utf-8",
         )
         (adapter / "adapter_model.safetensors").write_bytes(b"identical-weights")
         manifest = {
@@ -330,7 +359,14 @@ def test_benchmark_rejects_mismatched_sft_and_raft_source_partitions(
         adapter = tmp_path / mode
         adapter.mkdir()
         (adapter / "adapter_config.json").write_text(
-            json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+            json.dumps(
+                peft_lora_config_kwargs(
+                    TEST_TRAINING_CONTROLS,
+                    model_id="test/model",
+                    revision="0" * 40,
+                )
+            ),
+            encoding="utf-8",
         )
         (adapter / "adapter_model.safetensors").write_bytes(mode.encode())
         manifest = {

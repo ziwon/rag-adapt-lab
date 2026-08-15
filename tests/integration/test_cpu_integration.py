@@ -15,7 +15,10 @@ from rag_adapt_lab.provenance import (
 )
 from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.factory import create_retriever
-from rag_adapt_lab.training.controls import normalize_training_controls
+from rag_adapt_lab.training.controls import (
+    normalize_training_controls,
+    peft_lora_config_kwargs,
+)
 from rag_adapt_lab.training.data import (
     prompt_completion_records,
     render_chat_prompt_completions,
@@ -94,11 +97,18 @@ def test_real_cpu_dependency_contracts(tmp_path: Path) -> None:
     evaluation.write_text('{"id":"eval","question":"held out"}\n', encoding="utf-8")
     adapter = tmp_path / "adapter"
     adapter.mkdir()
+    training_controls = normalize_training_controls({}, has_validation=True)
     (adapter / "adapter_config.json").write_text(
-        json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        json.dumps(
+            peft_lora_config_kwargs(
+                training_controls,
+                model_id="test/model",
+                revision="a" * 40,
+            )
+        ),
+        encoding="utf-8",
     )
     (adapter / "adapter_model.safetensors").write_bytes(b"real-artifact-bytes")
-    training_controls = normalize_training_controls({}, has_validation=True)
     manifest = {
         "schema_name": "raglab-adapter-manifest",
         "schema_version": ADAPTER_MANIFEST_SCHEMA_VERSION,

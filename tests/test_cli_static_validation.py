@@ -10,7 +10,10 @@ from typer.testing import CliRunner
 from rag_adapt_lab.cli import app
 from rag_adapt_lab.generation.prompts import rag_prompt_provenance
 from rag_adapt_lab.provenance import artifact_sha256, canonical_sha256, file_sha256
-from rag_adapt_lab.training.controls import normalize_training_controls
+from rag_adapt_lab.training.controls import (
+    normalize_training_controls,
+    peft_lora_config_kwargs,
+)
 
 
 def write_yaml(path: Path, value: dict[str, object]) -> None:
@@ -27,7 +30,14 @@ def write_adapter(
 ) -> dict[str, object]:
     path.mkdir()
     (path / "adapter_config.json").write_text(
-        json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        json.dumps(
+            peft_lora_config_kwargs(
+                controls,
+                model_id="test/model",
+                revision="0" * 40,
+            )
+        ),
+        encoding="utf-8",
     )
     (path / "adapter_model.safetensors").write_bytes(weight_bytes or mode.encode())
     manifest: dict[str, object] = {
@@ -138,14 +148,30 @@ def test_dry_run_performs_full_static_protocol_validation(tmp_path: Path) -> Non
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["validation"] == {
-        "validation_level": "static-protocol",
-        "model_weights_loaded": False,
-        "adapter_provenance_validated": True,
-        "training_controls_matched": True,
-        "scorer_configuration_validated": True,
-        "ready_for_execution": True,
-    }
+    validation = payload["validation"]
+    assert validation["validation_level"] == "static-protocol"
+    assert validation["model_weights_loaded"] is False
+    assert validation["adapter_provenance_validated"] is True
+    assert validation["training_controls_matched"] is True
+    assert validation["scorer_configuration_validated"] is True
+    assert validation["ready_for_execution"] is True
+    assert all(
+        item["status"] == "verified"
+        for item in validation["adapter_provenance"].values()
+    )
+
+
+def test_dry_run_records_structured_legacy_adapter_status(tmp_path: Path) -> None:
+    args, _ = static_fixture(tmp_path)
+    (tmp_path / "raft" / "raglab_adapter_manifest.json").unlink()
+    args.append("--allow-unverified-adapter")
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    provenance = payload["validation"]["adapter_provenance"]["raft-rag"]
+    assert provenance["verified"] is False
+    assert provenance["status"] == "legacy_manifest_unavailable"
+    assert provenance["reason_code"] == "manifest_missing"
 
 
 @pytest.mark.parametrize(
@@ -201,6 +227,11 @@ def test_dry_run_fails_unmatched_training_controls(tmp_path: Path) -> None:
     controls["adapter"] = {**controls["adapter"], "rank": 64}
     manifests["raft"]["training_controls"] = controls
     manifests["raft"]["training_control_sha256"] = canonical_sha256(controls)
+    peft_path = tmp_path / "raft" / "adapter_config.json"
+    peft_config = json.loads(peft_path.read_text(encoding="utf-8"))
+    peft_config["r"] = 64
+    peft_path.write_text(json.dumps(peft_config), encoding="utf-8")
+    manifests["raft"]["adapter_artifact_sha256"] = artifact_sha256(tmp_path / "raft")
     rewrite_manifest(tmp_path / "raft", manifests["raft"])
     result = CliRunner().invoke(app, args)
     assert result.exit_code != 0

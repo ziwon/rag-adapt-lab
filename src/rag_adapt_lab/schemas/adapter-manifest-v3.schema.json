@@ -46,7 +46,7 @@
     "validation_source_fingerprint": {"$ref": "#/$defs/digest"},
     "held_out_evaluation_sha256": {"$ref": "#/$defs/digest"},
     "training_configuration_sha256": {"$ref": "#/$defs/digest"},
-    "training_controls": {"type": "object", "minProperties": 1},
+    "training_controls": {"$ref": "training-controls-v1.schema.json"},
     "training_control_sha256": {"$ref": "#/$defs/digest"},
     "adapter_artifact_sha256": {"$ref": "#/$defs/digest"},
     "best_checkpoint": {"$ref": "#/$defs/nullableString"},

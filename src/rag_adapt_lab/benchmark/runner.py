@@ -235,7 +235,6 @@ class BenchmarkRunner:
         if (
             any(job.recipe in {"sft-rag", "raft-rag"} for job in self.jobs)
             and self.eval_sha256 is None
-            and not self.allow_unverified_adapter
         ):
             raise ValueError(
                 "eval_path is required to verify adapted benchmark conditions against the "
@@ -260,10 +259,7 @@ class BenchmarkRunner:
             and configured_raft is not None
             and configured_sft.resolve() == configured_raft.resolve()
         ):
-            message = "SFT and RAFT conditions use the same adapter artifact"
-            if not self.allow_unverified_adapter:
-                raise ValueError(message)
-            self.provenance_warnings.append(message)
+            raise ValueError("SFT and RAFT conditions use the same adapter artifact")
         for job in self.jobs:
             if job.recipe not in {"sft-rag", "raft-rag"}:
                 continue
@@ -291,11 +287,7 @@ class BenchmarkRunner:
             and sft.artifact_sha256 == raft.artifact_sha256
         )
         if same_hash:
-            message = "SFT and RAFT conditions use the same adapter artifact"
-            if not self.allow_unverified_adapter:
-                raise ValueError(message)
-            if message not in self.provenance_warnings:
-                self.provenance_warnings.append(message)
+            raise ValueError("SFT and RAFT conditions use the same adapter artifact")
 
         if sft is not None and raft is not None and sft.verified and raft.verified:
             mismatched_partitions = [
@@ -315,13 +307,10 @@ class BenchmarkRunner:
                 if sft_fingerprint != raft_fingerprint
             ]
             if mismatched_partitions:
-                message = (
+                raise ValueError(
                     "SFT and RAFT conditions use different underlying source "
                     f"partitions: {', '.join(mismatched_partitions)}"
                 )
-                if not self.allow_unverified_adapter:
-                    raise ValueError(message)
-                self.provenance_warnings.append(message)
 
             self.training_controls_matched = (
                 sft.training_control_sha256 == raft.training_control_sha256
@@ -686,8 +675,9 @@ class BenchmarkRunner:
                 "schema_version": BENCHMARK_SCHEMA_VERSION,
                 "configuration": configuration,
                 "provenance": {
-                    "verified": not self.provenance_warnings
-                    and all(item.verified for item in self.adapter_verifications.values()),
+                    "verified": all(
+                        item.verified for item in self.adapter_verifications.values()
+                    ),
                     "confounded": self.training_controls_matched is False,
                     "allow_unverified_adapter": self.allow_unverified_adapter,
                     "allow_unmatched_training_controls": (

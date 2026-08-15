@@ -38,12 +38,19 @@
       "type": "object", "additionalProperties": false,
       "required": [
         "validation_level", "model_weights_loaded", "adapter_provenance_validated",
-        "training_controls_matched", "scorer_configuration_validated", "ready_for_execution"
+        "adapter_provenance", "training_controls_matched",
+        "scorer_configuration_validated", "ready_for_execution"
       ],
       "properties": {
         "validation_level": {"enum": ["structural", "static-protocol"]},
         "model_weights_loaded": {"const": false},
         "adapter_provenance_validated": {"type": "boolean"},
+        "adapter_provenance": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "benchmark-summary-v3.schema.json#/$defs/adapterProvenance"
+          }
+        },
         "training_controls_matched": {"type": ["boolean", "null"]},
         "scorer_configuration_validated": {"type": "boolean"},
         "ready_for_execution": {"type": "boolean"}

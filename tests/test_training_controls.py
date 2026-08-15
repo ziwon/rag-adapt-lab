@@ -14,6 +14,7 @@ from rag_adapt_lab.recipes.plan import build_plan
 from rag_adapt_lab.retrieval.base import RetrievalResult, Retriever
 from rag_adapt_lab.training.controls import (
     normalize_training_controls,
+    peft_lora_config_kwargs,
     training_control_sha256,
 )
 
@@ -66,7 +67,14 @@ def write_adapter(
 ) -> None:
     path.mkdir()
     (path / "adapter_config.json").write_text(
-        json.dumps({"base_model_name_or_path": "test/model"}), encoding="utf-8"
+        json.dumps(
+            peft_lora_config_kwargs(
+                controls,
+                model_id="test/model",
+                revision="0" * 40,
+            )
+        ),
+        encoding="utf-8",
     )
     (path / "adapter_model.safetensors").write_bytes(f"weights-{mode}".encode())
     manifest = {
@@ -194,7 +202,7 @@ def test_training_control_override_marks_report_confounded(tmp_path: Path) -> No
     summary = runner.run()
     comparison = summary["comparisons"]["sft-rag->raft-rag"]["token_f1"]
     assert summary["provenance"]["confounded"] is True
-    assert summary["provenance"]["verified"] is False
+    assert summary["provenance"]["verified"] is True
     assert comparison["decision_eligible"] is False
     assert comparison["status"] == "confounded_training_controls"
     report = (tmp_path / "benchmark" / "report.md").read_text(encoding="utf-8")

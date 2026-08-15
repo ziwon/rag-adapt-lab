@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from rag_adapt_lab.provenance import canonical_sha256
+from rag_adapt_lab.schema_validation import validate_artifact_schema
 
 
 def _normalized_target_modules(value: Any) -> str | list[str]:
@@ -17,6 +19,44 @@ def _normalized_target_modules(value: Any) -> str | list[str]:
             raise ValueError("target_modules must not be empty")
         return modules
     raise ValueError("target_modules must be a string or sequence of strings")
+
+
+def _normalized_optional_modules(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    normalized = _normalized_target_modules(value)
+    return [normalized] if isinstance(normalized, str) else normalized
+
+
+def _normalized_pattern(value: Any, *, name: str) -> dict[str, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    normalized = {str(key): int(item) for key, item in value.items()}
+    if any(not key or item < 1 for key, item in normalized.items()):
+        raise ValueError(f"{name} keys must be non-empty and values must be positive")
+    return dict(sorted(normalized.items()))
+
+
+def _normalized_layers(value: Any) -> int | list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return sorted({int(item) for item in value})
+    raise ValueError("layers_to_transform must be an integer or sequence of integers")
+
+
+def _normalized_layer_patterns(value: Any) -> str | list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError("layers_pattern must not be blank")
+        return value
+    return _normalized_optional_modules(value)
 
 
 def normalize_training_controls(
@@ -56,15 +96,33 @@ def normalize_training_controls(
         training_cfg.get("target_modules", "all-linear")
     )
 
-    return {
+    controls = {
         "adaptation_method": adaptation_method,
         "adapter": {
+            "peft_type": "LORA",
             "rank": int(training_cfg.get("lora_r", 16)),
             "alpha": int(training_cfg.get("lora_alpha", 32)),
             "dropout": float(training_cfg.get("lora_dropout", 0.05)),
             "target_modules": target_modules,
             "bias": str(training_cfg.get("lora_bias", "none")),
             "task_type": "CAUSAL_LM",
+            "modules_to_save": _normalized_optional_modules(
+                training_cfg.get("modules_to_save")
+            ),
+            "use_rslora": bool(training_cfg.get("use_rslora", False)),
+            "use_dora": bool(training_cfg.get("use_dora", False)),
+            "rank_pattern": _normalized_pattern(
+                training_cfg.get("rank_pattern"), name="rank_pattern"
+            ),
+            "alpha_pattern": _normalized_pattern(
+                training_cfg.get("alpha_pattern"), name="alpha_pattern"
+            ),
+            "layers_to_transform": _normalized_layers(
+                training_cfg.get("layers_to_transform")
+            ),
+            "layers_pattern": _normalized_layer_patterns(
+                training_cfg.get("layers_pattern")
+            ),
         },
         "optimization": {
             "learning_rate": float(training_cfg.get("learning_rate", 2e-4)),
@@ -154,10 +212,69 @@ def normalize_training_controls(
             },
         },
     }
+    validate_training_controls(controls)
+    return controls
+
+
+def validate_training_controls(controls: Mapping[str, Any]) -> None:
+    """Validate the structural contract and cross-field semantic guarantees."""
+    validate_artifact_schema(dict(controls), "training-controls-v1.schema.json")
+    batching = controls["batching"]
+    per_device_batch = int(batching["per_device_train_batch_size"])
+    accumulation = int(batching["gradient_accumulation_steps"])
+    expected_batch = per_device_batch * accumulation
+    if (
+        int(batching["effective_batch_size"]) != expected_batch
+        or int(batching["effective_batch_size_per_device"]) != expected_batch
+    ):
+        raise ValueError(
+            "training_controls effective_batch_size must equal "
+            "per_device_train_batch_size × gradient_accumulation_steps"
+        )
+    expected_method = "qlora" if controls["quantization"]["load_in_4bit"] else "lora"
+    if controls["adaptation_method"] != expected_method:
+        raise ValueError(
+            "training_controls adaptation_method conflicts with quantization.load_in_4bit"
+        )
+
+
+def peft_lora_config_kwargs(
+    controls: Mapping[str, Any],
+    *,
+    model_id: str,
+    revision: str | None,
+) -> dict[str, Any]:
+    """Map the canonical adapter contract to PEFT's persisted field names."""
+    adapter = controls["adapter"]
+    return {
+        "base_model_name_or_path": model_id,
+        "revision": revision,
+        "peft_type": adapter["peft_type"],
+        "task_type": adapter["task_type"],
+        "r": adapter["rank"],
+        "lora_alpha": adapter["alpha"],
+        "lora_dropout": adapter["dropout"],
+        "bias": adapter["bias"],
+        "target_modules": adapter["target_modules"],
+        "modules_to_save": adapter["modules_to_save"],
+        "use_rslora": adapter["use_rslora"],
+        "use_dora": adapter["use_dora"],
+        "rank_pattern": adapter["rank_pattern"],
+        "alpha_pattern": adapter["alpha_pattern"],
+        "layers_to_transform": adapter["layers_to_transform"],
+        "layers_pattern": adapter["layers_pattern"],
+    }
 
 
 def training_control_sha256(controls: Mapping[str, Any]) -> str:
-    return canonical_sha256(controls)
+    payload = json.dumps(
+        controls,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def training_control_differences(

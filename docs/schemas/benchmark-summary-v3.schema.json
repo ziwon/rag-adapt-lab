@@ -8,6 +8,62 @@
     "schema_name", "schema_version", "configuration", "provenance",
     "retrieval_metrics", "recipes", "comparisons"
   ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "adapterProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path", "verified", "status", "reason_code", "artifact_sha256",
+        "adaptation_mode", "training_source_fingerprint",
+        "validation_source_fingerprint", "training_control_sha256",
+        "training_controls", "unchecked_fields", "warnings",
+        "manifest_schema_version", "manifest_schema_name"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "verified": {"type": "boolean"},
+        "status": {
+          "enum": [
+            "verified", "legacy_manifest_unavailable", "unverified_legacy_provenance"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "manifest_missing", "legacy_schema_unsupported",
+            "legacy_prompt_provenance_unavailable",
+            "legacy_training_controls_unavailable", null
+          ]
+        },
+        "artifact_sha256": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        },
+        "adaptation_mode": {"enum": ["sft", "raft", null]},
+        "training_source_fingerprint": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        },
+        "validation_source_fingerprint": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        },
+        "training_control_sha256": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        },
+        "training_controls": {
+          "oneOf": [
+            {"$ref": "training-controls-v1.schema.json"},
+            {"type": "null"}
+          ]
+        },
+        "unchecked_fields": {
+          "type": "array", "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "manifest_schema_version": {"type": ["integer", "null"]},
+        "manifest_schema_name": {"type": ["string", "null"]}
+      }
+    }
+  },
   "properties": {
     "schema_name": {"const": "benchmark-summary"},
     "schema_version": {"const": 3},
@@ -44,7 +100,12 @@
         "properties": {
           "adapter_path": {"type": ["string", "null"]},
           "adapter_sha256": {"type": ["string", "null"]},
-          "adapter_provenance": {"type": ["object", "null"]},
+          "adapter_provenance": {
+            "oneOf": [
+              {"$ref": "#/$defs/adapterProvenance"},
+              {"type": "null"}
+            ]
+          },
           "retrieval_enabled": {"type": "boolean"},
           "predictions": {"type": "string"},
           "metrics": {"type": "object"}

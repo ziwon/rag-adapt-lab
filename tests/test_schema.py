@@ -1,5 +1,8 @@
+import copy
 import json
 from pathlib import Path
+
+import pytest
 
 from rag_adapt_lab.data.schema import Document, EvalExample
 from rag_adapt_lab.provenance import (
@@ -8,6 +11,10 @@ from rag_adapt_lab.provenance import (
     TRAINING_MANIFEST_SCHEMA_VERSION,
 )
 from rag_adapt_lab.schema_validation import load_artifact_schema, validate_artifact_schema
+from rag_adapt_lab.training.controls import (
+    normalize_training_controls,
+    validate_training_controls,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +50,24 @@ def test_machine_readable_manifest_schemas_match_runtime_versions() -> None:
         packaged_schema = load_artifact_schema(filename)
         assert documented_schema == packaged_schema
         assert packaged_schema["properties"]["schema_version"]["const"] == version
+
+
+def test_canonical_training_controls_schema_is_shared_and_documented() -> None:
+    packaged = load_artifact_schema("training-controls-v1.schema.json")
+    documented = json.loads(
+        (PROJECT_ROOT / "docs/schemas/training-controls-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert documented == packaged
+    for manifest_name in (
+        "adapter-manifest-v3.schema.json",
+        "training-manifest-v3.schema.json",
+    ):
+        assert (
+            load_artifact_schema(manifest_name)["properties"]["training_controls"]
+            == {"$ref": "training-controls-v1.schema.json"}
+        )
 
 
 def test_all_current_artifact_schemas_have_distinct_identities() -> None:
@@ -103,7 +128,7 @@ def test_representative_training_manifest_validates_nested_contract() -> None:
         "chat_template_kwargs": {},
         "training_config": {},
         "training_configuration_sha256": digest,
-        "training_controls": {"adapter": {"rank": 8}},
+        "training_controls": normalize_training_controls({}, has_validation=True),
         "training_control_sha256": digest,
         "training_dataset_fingerprint": digest,
         "validation_dataset_fingerprint": digest,
@@ -138,3 +163,32 @@ def test_representative_training_manifest_validates_nested_contract() -> None:
         "adapter_artifact_sha256": digest,
     }
     validate_artifact_schema(manifest, "training-manifest-v3.schema.json")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda controls: controls.update(adapter={"rank": 8}),
+        lambda controls: controls["adapter"].update(rank=0),
+        lambda controls: controls["adapter"].update(dropout=1.1),
+        lambda controls: controls["quantization"].update(type="int8"),
+        lambda controls: controls.pop("seeds"),
+        lambda controls: controls.pop("checkpoint_selection"),
+        lambda controls: controls["adapter"].update(unknown_weight_control=True),
+    ],
+)
+def test_incomplete_or_invalid_training_controls_fail_json_schema(
+    mutation: object,
+) -> None:
+    controls = normalize_training_controls({}, has_validation=True)
+    mutation(controls)  # type: ignore[operator]
+    with pytest.raises(ValueError, match="training-controls-v1"):
+        validate_artifact_schema(controls, "training-controls-v1.schema.json")
+
+
+def test_effective_batch_size_relationship_is_runtime_validated() -> None:
+    controls = copy.deepcopy(normalize_training_controls({}, has_validation=True))
+    controls["batching"]["effective_batch_size"] += 1
+    validate_artifact_schema(controls, "training-controls-v1.schema.json")
+    with pytest.raises(ValueError, match="effective_batch_size"):
+        validate_training_controls(controls)

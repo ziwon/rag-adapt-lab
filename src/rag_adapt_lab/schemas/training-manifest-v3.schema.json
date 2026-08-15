@@ -33,7 +33,7 @@
     "chat_template_kwargs": {"type": "object"},
     "training_config": {"type": "object"},
     "training_configuration_sha256": {"$ref": "#/$defs/digest"},
-    "training_controls": {"type": "object", "minProperties": 1},
+    "training_controls": {"$ref": "training-controls-v1.schema.json"},
     "training_control_sha256": {"$ref": "#/$defs/digest"},
     "training_dataset_fingerprint": {"$ref": "#/$defs/digest"},
     "validation_dataset_fingerprint": {"$ref": "#/$defs/digest"},
