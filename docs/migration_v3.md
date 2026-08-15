@@ -8,11 +8,31 @@ Fresh training writes `training_source_fingerprint` and `validation_source_finge
 
 The final v0.2 contract also requires `training_controls` and
 `training_control_sha256` in both training and adapter manifests. Early schema-v3 artifacts that
-lack these fields no longer pass strict validation: retrain them rather than inventing provenance.
+lack these fields—or the complete canonical adapter-control fields—no longer pass strict
+validation: retrain them rather than inventing provenance.
 The normalized object excludes paths, tracking, and the SFT/RAFT representation name but includes
 all material LoRA/QLoRA, optimization, effective-batch, sequence, warmup, precision,
 quantization, seed, early-stopping, and best-model-selection controls. A mismatch fails closed;
 `--allow-unmatched-training-controls` produces a clearly confounded, decision-ineligible report.
+
+The adapter-control section is now checked against the actual PEFT `adapter_config.json`. New
+training records PEFT/task types, rank, alpha, dropout, bias, canonical target modules,
+modules-to-save, RSLoRA/DoRA, rank/alpha patterns, and supported layer selectors. A schema-v3
+manifest that contradicts those persisted settings is invalid even when its own digest is
+internally consistent. Training and adapter manifests reference one shared
+`training-controls-v1` JSON Schema; effective-batch arithmetic and adaptation-method versus
+quantization agreement remain additional runtime semantic checks.
+
+`--allow-unverified-adapter` is narrower than the original schema-v3 release. It permits a missing
+manifest or a validated schema-v2 manifest whose historical source/control provenance is
+unavailable. It does not permit malformed schema-v3 data or known model, revision, adaptation-mode,
+prompt, held-out-evaluation, PEFT-configuration, training-control-hash, or artifact-hash
+contradictions. Machine output records `status`, `reason_code`, and `unchecked_fields` for an
+accepted legacy adapter. Artifact integrity is never overridable.
+
+RAFT JSONL now has a model-level invariant: `evidence_doc_ids` must equal exactly the unique
+`contexts[].doc_id` values marked `relevant=true`. Previously prepared rows that violate the
+invariant must be regenerated; they cannot be fingerprinted or trained as valid RAFT data.
 
 Prompt v4 hashes the empty-, one-, and multi-document rendering branches. Verifiable training now requires `use_chat_template: true`; a plain prompt-completion representation cannot claim the model-facing inference prompt identity.
 

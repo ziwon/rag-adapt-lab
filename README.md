@@ -104,6 +104,18 @@ The labeled RAFT source uses the same schema as `eval.jsonl`, but it must be a d
 
 `raglab prepare-raft --held-out-eval ...` rejects reused record IDs and normalized questions so evaluation examples cannot accidentally become training examples.
 
+Prepared RAFT rows carry contexts plus auditable evidence metadata:
+
+```json
+{"id":"train-q-001","question":"What is ...?","answer":"...","contexts":[{"doc_id":"doc-001","text":"...","relevant":true},{"doc_id":"doc-002","text":"...","relevant":false}],"evidence_doc_ids":["doc-001"]}
+```
+
+The invariant is strict and set-based: `evidence_doc_ids` must exactly match the unique context
+IDs marked `relevant=true`, with at least one positive and no duplicated context/evidence IDs.
+It is enforced for native builders and externally authored JSONL before writing, loading,
+fingerprinting, or prompt rendering. Relevance flags and evidence IDs remain audit metadata and
+are never rendered to the model.
+
 ### `sft.jsonl` (optional)
 
 ```json
@@ -240,14 +252,20 @@ Adapter validation fails closed. SFT and RAFT manifests must declare the expecte
 the benchmark model revision, prompt contract, chat-template args, and current held-out file hash;
 their recorded artifact hashes are recomputed, identical artifacts are rejected, and their
 training and validation source fingerprints—derived from source IDs, normalized questions, and
-target answers—must match. A legacy adapter can be run only with `--allow-unverified-adapter`; the
-CLI emits a warning and both
-`summary.json` and `report.md` label the experiment as unverified.
+target answers—must match. Schema-v3 controls are also cross-validated against the persisted PEFT
+`adapter_config.json`, including model identity, revision when recorded, LoRA rank/alpha/dropout,
+bias, target modules, task/PEFT types, modules-to-save, and supported patterned/DoRA/RSLoRA
+controls. `--allow-unverified-adapter` permits only genuinely missing historical provenance: a
+missing manifest or a recognized legacy schema. It never permits a known model, revision, mode,
+prompt, evaluation, PEFT-configuration, control-hash, or artifact-integrity contradiction. Legacy
+runs carry a structured status, reason code, unchecked fields, and warnings in `summary.json`.
 
 Training-control mismatches are a separate confound and fail closed by default. The explicit
 `--allow-unmatched-training-controls` override retains raw results but marks provenance and the
 SFT → RAFT comparison as confounded, lists the differing normalized fields, and suppresses causal
-or decision-oriented language.
+or decision-oriented language. Reports therefore distinguish three states: verified artifact
+provenance, unverified legacy provenance, and known confounded training controls. Artifact
+integrity failure is not an overridable state.
 
 Outputs include:
 
@@ -455,7 +473,7 @@ Current limitations:
 ## Validation layers
 
 - **Unit tests:** core/dev dependencies; token-level protocol, provenance, schema, CLI failure, and
-  coverage-aware statistical tests.
+  coverage-aware statistical tests, including RAFT metadata and manifest-to-PEFT invariants.
 - **CPU integration:** pinned real BM25, Datasets, Transformers, TRL, PEFT manifest contracts,
   report generation, and Compose parsing without model downloads.
 - **GPU integration:** constructs a local tiny model, trains matched-source SFT/RAFT LoRA adapters,

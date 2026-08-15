@@ -33,7 +33,7 @@ Trainer ───> versioned SFT/RAFT adapters ───────┘         
 
 ### Data
 
-The data package validates domain-neutral JSONL records and prepares RAFT-style training samples. Negative mining is a strategy: random sampling is the control, BM25 hard-negative mining is built in, and any `Retriever` can be injected for dense or hybrid mining. Oracle relevance is retained in JSONL metadata but is stripped from model-facing prompts.
+The data package validates domain-neutral JSONL records and prepares RAFT-style training samples. Negative mining is a strategy: random sampling is the control, BM25 hard-negative mining is built in, and any `Retriever` can be injected for dense or hybrid mining. A RAFT model validator requires `evidence_doc_ids` to equal exactly the unique context IDs marked relevant. Builders share one positive/negative context constructor, while ingestion, persistence, fingerprinting, and prompt rendering revalidate externally authored rows. Oracle relevance remains audit metadata and is stripped from model-facing prompts.
 
 ### Retrieval
 
@@ -57,9 +57,12 @@ Both training modes use prompt v4: SFT passes an empty context list and RAFT pas
 Training and adapter manifests use schema v3. Both persist a canonical normalized training-control
 object and SHA-256 digest. The benchmark recomputes adapter artifact hashes and validates model
 revision, adaptation mode, prompt identity/hash, chat-template args, the exact held-out evaluation
-hash, and matched source-partition and training-control fingerprints for SFT versus RAFT. Missing
-or incompatible manifests fail closed unless the corresponding visibly recorded override is
-enabled; a training-control override is labeled confounded rather than merely legacy-unverified.
+hash, and matched source-partition and training-control fingerprints for SFT versus RAFT. The
+normalized adapter portion is also compared field-by-field with `adapter_config.json`, including
+supported PEFT features that change learned weights. A missing/current-malformed manifest,
+identity contradiction, PEFT contradiction, or artifact mismatch is classified explicitly.
+Only missing or recognized legacy provenance can use the visibly recorded unverified-adapter
+override; a separate training-control override is labeled confounded rather than legacy-unverified.
 
 ### Evaluation
 
@@ -80,6 +83,9 @@ RAFT is most reusable when its semantics are represented in data:
 - distractors;
 - answer;
 - evidence IDs.
+
+The evidence IDs and relevance flags are redundant by design so audits can detect bad preparation:
+their two sets must be exactly equal. Order has no semantic meaning.
 
 This makes the training backend replaceable and keeps domain logic out of trainer code. New negative-mining methods should implement or compose a retriever rather than introduce domain-specific trainers.
 

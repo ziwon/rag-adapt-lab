@@ -60,6 +60,13 @@ Do not create training examples from held-out answers. Always pass the benchmark
 
 For synthetic data generation, record the source model, prompt version, filtering rules, and whether evaluation documents were excluded. For hard-negative mining, index only the training corpus. Record the mining strategy, seed, candidate pool, selected document IDs, ranks, and scores.
 
+Every prepared or externally authored RAFT row must satisfy the schema-level evidence invariant:
+`set(evidence_doc_ids)` equals the set of unique `contexts[].doc_id` values whose `relevant` flag
+is true. Context IDs and evidence IDs are unique, at least one context is relevant, and every
+non-evidence context is explicitly irrelevant. Validate this before persistence, ingestion,
+fingerprinting, and prompt construction. These fields are audit metadata only; never expose them
+as oracle labels in model-facing text.
+
 ## Latency protocol
 
 The local runner performs an unmeasured warm-up and synchronizes CUDA around transfers and generation. Persist retrieval, prompt-build, chat-template, tokenization, device-transfer, model-generate, decode, inference-E2E, deterministic-scoring, and judge latency separately. Judge latency is never part of user-facing inference latency. Report allocated and reserved CUDA peaks, output/total-token throughput, batch size, and sequential/batched mode. Repeat timing runs on an idle machine when small differences matter.
@@ -68,12 +75,17 @@ The local runner performs an unmeasured warm-up and synchronizes CUDA around tra
 
 Schema-v3 adapter manifests are mandatory by default. Before loading, validate the immutable base,
 expected SFT/RAFT mode, prompt name/version/hash, chat-template arguments, held-out file hash, and
-recomputed adapter artifact hash. Distinct SFT and RAFT conditions must not resolve to the same
+recomputed adapter artifact hash. Cross-validate the manifest model and normalized adapter
+controls against `adapter_config.json`; canonicalize order-insensitive collections but reject
+material differences. Distinct SFT and RAFT conditions must not resolve to the same
 path or artifact hash. Their source-partition fingerprints and normalized training-control hashes
 must match. If controls differ, list every mismatched field and fail closed. The separate
 `--allow-unmatched-training-controls` override labels the comparison confounded and disables
-decision language. `--allow-unverified-adapter` remains only a legacy escape hatch; both overrides
-must remain visible in machine and Markdown reports.
+decision language. `--allow-unverified-adapter` permits missing historical provenance from a
+missing or recognized legacy manifest only. It cannot override a known identity, configuration,
+prompt/evaluation, control-hash, schema-v3, or artifact-integrity failure. Record legacy reason
+codes and unchecked fields. Both overrides must remain visible in machine and Markdown reports,
+and artifact-integrity failure is never an output state because execution stops.
 
 ## Thinking-mode protocol
 
